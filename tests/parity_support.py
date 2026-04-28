@@ -45,7 +45,7 @@ def build_go_cli(tmp_path: Path) -> Path:
     go_source = Path("../tidemark-go")
     assert go_source.exists(), "expected local ../tidemark-go reference checkout"
     output = tmp_path / "tidemark-go"
-    result = run_command("build go reference cli", ["go", "build", "-o", str(output), "."], cwd=go_source)
+    result = run_command("build go reference cli", ["go", "build", "-o", str(output), "./cmd/tidemark"], cwd=go_source)
     result.assert_success()
     assert output.exists(), "go build completed without producing tidemark-go binary"
     return output
