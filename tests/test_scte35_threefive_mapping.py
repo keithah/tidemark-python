@@ -9,6 +9,21 @@ from tidemark.markers import AdMarker, decode_scte35_marker
 
 SPLICE_INSERT_OON_TRUE = "/DAvAAAAAAAA///wFAVIAACef+/+c2nALv4AUsz1AAAAAAAMAQpDVUVJAAABNWLbowo="
 SPLICE_NULL = "/DARAAAAAAAAAP/wAAAAAHpPGuQ="
+SPLICE_NULL_HEX = "0xFC301100000000000000FFF0000000007A4F1AE4"
+EXPECTED_MARKER_KEYS = [
+    "Type",
+    "Classification",
+    "Source",
+    "Tag",
+    "PTS",
+    "Segment",
+    "RawBase64",
+    "Command",
+    "Descriptors",
+    "Tags",
+    "Fields",
+    "Timestamp",
+]
 
 
 def test_threefive_imports_current_local_package():
@@ -61,20 +76,7 @@ def test_decode_splice_insert_marker_preserves_go_compatible_contract():
     assert isinstance(marker, AdMarker)
     marker_dict = marker.to_dict()
 
-    assert list(marker_dict) == [
-        "Type",
-        "Classification",
-        "Source",
-        "Tag",
-        "PTS",
-        "Segment",
-        "RawBase64",
-        "Command",
-        "Descriptors",
-        "Tags",
-        "Fields",
-        "Timestamp",
-    ]
+    assert list(marker_dict) == EXPECTED_MARKER_KEYS
     assert marker_dict["Type"] == "SCTE35"
     assert marker_dict["Classification"] == "UNKNOWN"
     assert marker_dict["Source"] == "hls_manifest"
@@ -97,6 +99,7 @@ def test_decode_splice_null_marker_has_default_containers_and_json_contract():
 
     marker_dict = marker.to_dict()
 
+    assert list(marker_dict) == EXPECTED_MARKER_KEYS
     assert marker_dict["Fields"]["CommandName"] == "Splice Null"
     assert marker_dict["PTS"] is None
     assert marker_dict["Descriptors"] == []
@@ -108,10 +111,41 @@ def test_decode_splice_null_marker_has_default_containers_and_json_contract():
     assert not ({"raw_base64", "break_duration", "classification"} & set(decoded))
 
 
-@pytest.mark.parametrize("payload", ["", "not-valid-base64!!!"])
+def test_decode_splice_null_hex_marker_matches_base64_contract():
+    base64_marker = decode_scte35_marker(SPLICE_NULL, source="fixture")
+    hex_marker = decode_scte35_marker(
+        SPLICE_NULL_HEX,
+        source="hls_manifest",
+        tag="#EXT-X-DATERANGE",
+        segment=3,
+        timestamp=45.0,
+    )
+
+    base64_dict = base64_marker.to_dict()
+    hex_dict = hex_marker.to_dict()
+
+    assert list(hex_dict) == EXPECTED_MARKER_KEYS
+    assert hex_dict["Classification"] == "UNKNOWN"
+    assert hex_dict["Source"] == "hls_manifest"
+    assert hex_dict["Tag"] == "#EXT-X-DATERANGE"
+    assert hex_dict["Segment"] == 3
+    assert hex_dict["Timestamp"] == 45.0
+    assert hex_dict["RawBase64"] == SPLICE_NULL
+    assert hex_dict["Command"] == base64_dict["Command"]
+    assert hex_dict["Descriptors"] == base64_dict["Descriptors"]
+    assert hex_dict["Fields"] == base64_dict["Fields"]
+    assert hex_dict["PTS"] == base64_dict["PTS"]
+
+
+@pytest.mark.parametrize(
+    "payload",
+    ["", "not-valid-base64!!!", "0xFC301100", "0xnot-hex", b"\xff\xfe"],
+)
 def test_decode_scte35_marker_rejects_malformed_payload_without_leaking_payload(payload):
     with pytest.raises(ValueError) as exc_info:
-        decode_scte35_marker(payload, source="fixture")
+        decode_scte35_marker(payload, source="https://secret.example/manifest.m3u8")
 
-    if payload:
-        assert payload not in str(exc_info.value)
+    message = str(exc_info.value)
+    if isinstance(payload, str) and payload:
+        assert payload not in message
+    assert "secret.example" not in message

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 from typing import Any
 
 import threefive
@@ -21,12 +22,10 @@ def decode_scte35_marker(
     Decode failures deliberately omit the input payload from error messages because
     future call sites may pass source manifests or private SCTE-35 data.
     """
-    raw_base64 = _payload_to_text(payload)
-    if not raw_base64:
-        raise ValueError("Unable to decode SCTE-35 payload: empty payload")
+    cue_text, raw_base64 = _normalize_payload_text(payload)
 
     try:
-        cue = threefive.Cue(payload)
+        cue = threefive.Cue(cue_text)
     except Exception as exc:  # pragma: no cover - exact dependency exception varies.
         raise ValueError("Unable to initialize SCTE-35 cue") from exc
 
@@ -38,6 +37,56 @@ def decode_scte35_marker(
     if decoded is not True:
         raise ValueError("Unable to decode SCTE-35 cue")
 
+    return _cue_to_ad_marker(
+        cue,
+        source=source,
+        tag=tag,
+        segment=segment,
+        timestamp=timestamp,
+        raw_base64=raw_base64,
+    )
+
+
+def _normalize_payload_text(payload: str | bytes) -> tuple[str, str]:
+    if isinstance(payload, bytes):
+        try:
+            payload_text = payload.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise ValueError("Unable to decode SCTE-35 payload bytes") from exc
+    else:
+        try:
+            payload.encode("ascii")
+        except UnicodeEncodeError as exc:
+            raise ValueError("Unable to decode SCTE-35 payload bytes") from exc
+        payload_text = payload
+
+    payload_text = payload_text.strip()
+    if not payload_text:
+        raise ValueError("Unable to decode SCTE-35 payload: empty payload")
+
+    if payload_text.lower().startswith("0x"):
+        hex_text = payload_text[2:]
+        if not hex_text:
+            raise ValueError("Unable to decode SCTE-35 payload bytes")
+        try:
+            payload_bytes = bytes.fromhex(hex_text)
+        except ValueError as exc:
+            raise ValueError("Unable to decode SCTE-35 payload bytes") from exc
+        raw_base64 = base64.b64encode(payload_bytes).decode("ascii")
+        return raw_base64, raw_base64
+
+    return payload_text, payload_text
+
+
+def _cue_to_ad_marker(
+    cue: threefive.Cue,
+    *,
+    source: str,
+    tag: str | None,
+    segment: int | None,
+    timestamp: float,
+    raw_base64: str,
+) -> AdMarker:
     command = _get_command(cue)
     descriptors = _get_descriptors(cue)
     fields = _build_fields(command, descriptors)
@@ -56,15 +105,6 @@ def decode_scte35_marker(
         fields=fields,
         timestamp=timestamp,
     )
-
-
-def _payload_to_text(payload: str | bytes) -> str:
-    if isinstance(payload, bytes):
-        try:
-            return payload.decode("ascii")
-        except UnicodeDecodeError as exc:
-            raise ValueError("Unable to decode SCTE-35 payload bytes") from exc
-    return payload
 
 
 def _get_command(cue: threefive.Cue) -> dict[str, Any]:
