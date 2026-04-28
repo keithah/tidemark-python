@@ -38,7 +38,7 @@ def decode_scte35_marker(
     if decoded is not True:
         raise ValueError("Unable to decode SCTE-35 cue")
 
-    return _cue_to_ad_marker(
+    return marker_from_scte35_cue(
         cue,
         source=source,
         tag=tag,
@@ -79,21 +79,48 @@ def decode_scte35_markers_from_mpegts(
 
     markers: list[AdMarker] = []
     for cue in cues:
-        try:
-            raw_base64 = cue.encode()
-        except Exception:
-            raw_base64 = None
         markers.append(
-            _cue_to_ad_marker(
+            marker_from_scte35_cue(
                 cue,
                 source=source,
                 tag=tag,
                 segment=segment,
                 timestamp=timestamp,
-                raw_base64=raw_base64,
             )
         )
     return markers
+
+
+def marker_from_scte35_cue(
+    cue: threefive.Cue,
+    *,
+    source: str,
+    tag: str | None = None,
+    segment: int | None = None,
+    timestamp: float = 0.0,
+    raw_base64: str | None = None,
+) -> AdMarker:
+    """Map a decoded ``threefive.Cue`` into the Go-compatible ``AdMarker`` contract.
+
+    This helper is the shared boundary for callers, such as MPEGTS stream ingest,
+    that already receive decoded cues from ``threefive`` and must not re-decode
+    private SCTE-35 payload bytes. Normalization errors intentionally omit raw
+    payload data and source URLs.
+    """
+    if raw_base64 is None:
+        try:
+            raw_base64 = cue.encode()
+        except Exception:
+            raw_base64 = None
+
+    return _cue_to_ad_marker(
+        cue,
+        source=source,
+        tag=tag,
+        segment=segment,
+        timestamp=timestamp,
+        raw_base64=raw_base64,
+    )
 
 
 def _normalize_payload_text(payload: str | bytes) -> tuple[str, str]:

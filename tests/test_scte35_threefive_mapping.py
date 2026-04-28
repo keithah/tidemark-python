@@ -5,6 +5,7 @@ import pytest
 import threefive
 
 from tidemark.markers import AdMarker, decode_scte35_marker, decode_scte35_markers_from_mpegts
+from tidemark.markers.scte35 import marker_from_scte35_cue
 
 
 SPLICE_INSERT_OON_TRUE = "/DAvAAAAAAAA///wFAVIAACef+/+c2nALv4AUsz1AAAAAAAMAQpDVUVJAAABNWLbowo="
@@ -62,6 +63,35 @@ def test_splice_insert_fixture_exposes_command_fields_and_descriptors():
     assert command["splice_event_id"] == 1207959710
     assert command["out_of_network_indicator"] is True
     assert cue.get_descriptors()
+
+
+def test_marker_from_scte35_cue_maps_decoded_splice_null_to_go_compatible_contract():
+    cue = threefive.Cue(SPLICE_NULL)
+    assert cue.decode() is True
+
+    marker = marker_from_scte35_cue(
+        cue,
+        source="mpegts",
+        timestamp=456.25,
+        raw_base64=SPLICE_NULL,
+    )
+
+    assert isinstance(marker, AdMarker)
+    marker_dict = marker.to_dict()
+
+    assert list(marker_dict) == EXPECTED_MARKER_KEYS
+    assert marker_dict["Type"] == "SCTE35"
+    assert marker_dict["Classification"] == "UNKNOWN"
+    assert marker_dict["Source"] == "mpegts"
+    assert marker_dict["Tag"] is None
+    assert marker_dict["Segment"] is None
+    assert marker_dict["RawBase64"] == SPLICE_NULL
+    assert marker_dict["Timestamp"] == 456.25
+    assert marker_dict["PTS"] is None
+    assert marker_dict["Command"]["name"] == "Splice Null"
+    assert marker_dict["Descriptors"] == []
+    assert marker_dict["Tags"] == []
+    assert marker_dict["Fields"] == {"CommandName": "Splice Null"}
 
 
 def test_decode_splice_insert_marker_preserves_go_compatible_contract():
