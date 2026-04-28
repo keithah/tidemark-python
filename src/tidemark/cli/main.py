@@ -7,6 +7,7 @@ import typer
 from typer.core import TyperGroup
 
 from tidemark.cli.cmd_monitor import monitor
+from tidemark.cli.cmd_search import search
 
 
 class RootAliasGroup(TyperGroup):
@@ -41,5 +42,6 @@ def root() -> None:
 
 
 app.command(name="monitor")(monitor)
+app.command(name="search")(search)
 
 __all__ = ["RootAliasGroup", "app", "root"]
