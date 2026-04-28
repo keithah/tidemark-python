@@ -1,0 +1,233 @@
+"""Library-first ingest pipeline composition for deterministic local sources."""
+
+from __future__ import annotations
+
+import json
+from dataclasses import dataclass
+from numbers import Real
+from pathlib import Path
+from typing import TYPE_CHECKING, Any
+
+from tidemark.ingest.segments import SegmentRecord, resolve_segments
+
+if TYPE_CHECKING:
+    from tidemark.transcribe import Transcriber
+
+FixtureTranscriptWord = tuple[str, float, float, float | None]
+
+
+@dataclass(frozen=True)
+class IngestIssue:
+    """Redacted per-segment ingest issue."""
+
+    phase: str
+    segment_sequence: int | None
+    message: str
+
+
+@dataclass(frozen=True)
+class IngestPipelineResult:
+    """Counters and issue records returned by the deterministic ingest pipeline."""
+
+    segment_ids: tuple[int, ...]
+    transcript_word_ids: tuple[int, ...]
+    ad_event_ids: tuple[int, ...]
+    issues: tuple[IngestIssue, ...]
+
+
+class TranscriptFixtureError(ValueError):
+    """Fixture transcript validation error with field-only diagnostics."""
+
+
+def load_fixture_transcript(path: str | Path) -> tuple[FixtureTranscriptWord, ...]:
+    """Load deterministic transcript words from a JSON fixture file."""
+    try:
+        raw_text = Path(path).read_text(encoding="utf-8")
+    except Exception as exc:
+        raise TranscriptFixtureError("fixture file could not be read") from exc
+
+    try:
+        payload = json.loads(raw_text)
+    except json.JSONDecodeError as exc:
+        raise TranscriptFixtureError("json must be valid") from exc
+
+    if not isinstance(payload, list):
+        raise TranscriptFixtureError("root must be a json array")
+
+    return tuple(_fixture_word_from_object(item) for item in payload)
+
+
+def ingest_source_to_db(
+    source: str | Path,
+    *,
+    db_path: str | Path,
+    transcriber: Transcriber,
+    source_url: str | None = None,
+    include_manifest_markers: bool = True,
+) -> IngestPipelineResult:
+    """Resolve, store, decode, transcribe, and search-proof local media input.
+
+    The pipeline is intentionally local-only: source resolution is delegated to
+    ``resolve_segments()``, which rejects network URLs with redacted diagnostics.
+    """
+    segments = resolve_segments(source, source_url=source_url)
+    from tidemark.store import initialize_db, insert_transcript_words
+
+    conn = initialize_db(db_path)
+    try:
+        segment_ids: list[int] = []
+        transcript_word_ids: list[int] = []
+        ad_event_ids = _insert_manifest_markers(
+            conn,
+            source,
+            source_url=source_url,
+            include_manifest_markers=include_manifest_markers,
+        )
+        issues: list[IngestIssue] = []
+
+        for segment in segments:
+            segment_id = _insert_segment(conn, segment)
+            segment_ids.append(segment_id)
+
+            try:
+                from tidemark.audio import AudioDecodeError, decode_segment_audio
+
+                chunk = decode_segment_audio(segment)
+            except AudioDecodeError as exc:
+                issues.append(_issue("decode", segment.sequence, str(exc)))
+                continue
+            except Exception as exc:
+                issues.append(_issue("decode", segment.sequence, "audio decode failed"))
+                continue
+
+            try:
+                transcript = transcriber.transcribe(chunk)
+            except Exception:
+                issues.append(_issue("transcribe", segment.sequence, "transcription failed"))
+                continue
+
+            try:
+                transcript_word_ids.extend(
+                    insert_transcript_words(
+                        conn,
+                        segment_id=segment_id,
+                        source_url=chunk.source_url,
+                        segment_sequence=chunk.segment_sequence,
+                        words=transcript.words,
+                    )
+                )
+            except Exception as exc:
+                issues.append(_issue("store_transcript", segment.sequence, _safe_store_message(exc)))
+                continue
+
+        return IngestPipelineResult(
+            segment_ids=tuple(segment_ids),
+            transcript_word_ids=tuple(transcript_word_ids),
+            ad_event_ids=tuple(ad_event_ids),
+            issues=tuple(issues),
+        )
+    finally:
+        conn.close()
+
+
+def _fixture_word_from_object(item: object) -> FixtureTranscriptWord:
+    if not isinstance(item, dict):
+        raise TranscriptFixtureError("item must be an object")
+
+    text = item.get("text")
+    if not isinstance(text, str) or not text.strip():
+        raise TranscriptFixtureError("text must be a non-empty string")
+
+    start_offset = _fixture_number(item.get("start_offset"), "start_offset")
+    end_offset = _fixture_number(item.get("end_offset"), "end_offset")
+    if start_offset < 0:
+        raise TranscriptFixtureError("start_offset must be >= 0")
+    if end_offset < start_offset:
+        raise TranscriptFixtureError("end_offset must be >= start_offset")
+
+    confidence_value = item.get("confidence")
+    confidence: float | None
+    if confidence_value is None:
+        confidence = None
+    else:
+        confidence = _fixture_number(confidence_value, "confidence")
+        if confidence < 0.0 or confidence > 1.0:
+            raise TranscriptFixtureError("confidence must be between 0 and 1")
+
+    return (text, start_offset, end_offset, confidence)
+
+
+def _fixture_number(value: object, field: str) -> float:
+    if not isinstance(value, Real) or isinstance(value, bool):
+        raise TranscriptFixtureError(f"{field} must be numeric")
+    return float(value)
+
+
+def _insert_segment(conn: Any, segment: SegmentRecord) -> int:
+    try:
+        from tidemark.store import insert_segment
+
+        return insert_segment(
+            conn,
+            source_url=segment.source_url,
+            sequence=segment.sequence,
+            resolved_uri=segment.resolved_uri,
+            local_path=segment.local_path,
+            start_ts=segment.start_ts,
+            duration_seconds=segment.duration_seconds if segment.duration_seconds is not None else 0.0,
+            byte_length=segment.byte_length,
+            sha256=segment.sha256,
+            metadata=segment.metadata,
+        )
+    except Exception as exc:
+        raise RuntimeError("pipeline segment store failed") from exc
+
+
+def _insert_manifest_markers(
+    conn: Any,
+    source: str | Path,
+    *,
+    source_url: str | None,
+    include_manifest_markers: bool,
+) -> list[int]:
+    if not include_manifest_markers:
+        return []
+
+    source_path = Path(source)
+    if source_path.suffix.lower() != ".m3u8":
+        return []
+
+    try:
+        manifest_text = source_path.read_text(encoding="utf-8")
+    except Exception as exc:
+        raise RuntimeError("pipeline manifest marker read failed") from exc
+
+    manifest_url = source_url or source_path.resolve().as_uri()
+    marker_ids: list[int] = []
+    try:
+        from tidemark.ingest.hls import iter_hls_manifest_scte35_markers
+        from tidemark.markers.classifier import Classifier
+        from tidemark.store import insert_ad_event
+
+        classifier = Classifier()
+        for marker in iter_hls_manifest_scte35_markers(
+            manifest_text,
+            manifest_url=manifest_url,
+            timestamp=0.0,
+        ):
+            classifier.classify(marker)
+            marker_ids.append(insert_ad_event(conn, manifest_url, marker))
+    except Exception as exc:
+        raise RuntimeError("pipeline manifest marker store failed") from exc
+    return marker_ids
+
+
+def _issue(phase: str, segment_sequence: int | None, message: str) -> IngestIssue:
+    return IngestIssue(phase=phase, segment_sequence=segment_sequence, message=message)
+
+
+def _safe_store_message(exc: Exception) -> str:
+    message = str(exc)
+    if "insert_transcript_words()" in message:
+        return message
+    return "transcript word store failed"
