@@ -16,6 +16,7 @@ from tidemark.runtime.health import (
     read_status_entries,
     redact_source_label,
 )
+from tidemark.runtime.logging import LifecycleLogger, resolve_lifecycle_log_path, write_lifecycle_event
 from tidemark.runtime.retry import RetryDecision, RetryPolicy
 
 __all__ = [
@@ -23,6 +24,7 @@ __all__ = [
     "SCHEMA_VERSION",
     "HealthRecord",
     "HealthReporter",
+    "LifecycleLogger",
     "ReadDiagnostic",
     "RetryDecision",
     "RetryPolicy",
@@ -35,4 +37,6 @@ __all__ = [
     "pid_exists",
     "read_status_entries",
     "redact_source_label",
+    "resolve_lifecycle_log_path",
+    "write_lifecycle_event",
 ]
