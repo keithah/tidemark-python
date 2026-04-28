@@ -89,6 +89,21 @@ def test_root_url_alias_invokes_same_monitor_path(monkeypatch: pytest.MonkeyPatc
     assert options.timeout == 2.5
 
 
+def test_root_url_alias_accepts_config_option(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_success(monkeypatch)
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text('[monitor]\nstream_type = "udp"\ntimeout_seconds = 2.5\n', encoding="utf-8")
+
+    result = invoke(["udp://239.1.1.1:5000", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls[0]["stream_type"] == "udp"
+    assert calls[0]["timeout"] == 2.5
+    options = calls[1]["options"]
+    assert isinstance(options, MonitorOptions)
+    assert options.timeout == 2.5
+
+
 def test_monitor_command_passes_all_options_without_suppressing_ndjson(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     calls = patch_success(monkeypatch, stdout_line='{"Type":"SCTE35"}')
     json_out = tmp_path / "markers.ndjson"

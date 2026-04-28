@@ -2,14 +2,18 @@
 
 from __future__ import annotations
 
+import os
 import sys
+import tomllib
 from enum import Enum
 from pathlib import Path
 from typing import Annotated
 
 import typer
 
-from tidemark.monitor import MonitorOptions, run_monitor
+from tidemark.config import ConfigError, MonitorOverrides, load_config, resolve_monitor_options
+from tidemark.monitor import MonitorOptions as RuntimeMonitorOptions
+from tidemark.monitor import run_monitor
 from tidemark.monitor_sources import MonitorSourceError, monitor_source
 
 
@@ -37,7 +41,7 @@ UrlArgument = Annotated[
     typer.Argument(help="Stream URL, UDP address, MPEG-TS file, or HLS manifest to monitor."),
 ]
 StreamTypeOption = Annotated[
-    CliStreamType,
+    CliStreamType | None,
     typer.Option("--stream-type", help="Force source type instead of auto-detection."),
 ]
 JsonOption = Annotated[
@@ -46,7 +50,7 @@ JsonOption = Annotated[
 ]
 QuietOption = Annotated[
     bool,
-    typer.Option("--quiet", help="Suppress stderr completion summaries. Marker NDJSON is still emitted."),
+    typer.Option("--quiet/--no-quiet", help="Suppress stderr completion summaries. Marker NDJSON is still emitted."),
 ]
 FilterOption = Annotated[
     CliMarkerFilter | None,
@@ -64,40 +68,60 @@ DbOption = Annotated[
     Path | None,
     typer.Option("--db", help="Persist emitted markers to a SQLite database."),
 ]
+ConfigOption = Annotated[
+    Path | None,
+    typer.Option("--config", help="TOML config file to load for command defaults."),
+]
 
 
 def run_monitor_command(
     url: str,
     *,
-    stream_type: CliStreamType = CliStreamType.AUTO,
+    stream_type: CliStreamType | None = None,
     json_output: bool = False,
     quiet: bool = False,
     marker_filter: CliMarkerFilter | None = None,
     json_out: Path | None = None,
     timeout: float | None = None,
     db_path: Path | None = None,
+    config_path: Path | None = None,
 ) -> None:
     """Convert CLI options and delegate to importable monitor/source layers."""
     _ = json_output  # Kept for compatibility; monitor output is always NDJSON.
     try:
+        config = load_config(config_path, explicit=config_path is not None)
+        resolved = resolve_monitor_options(
+            config,
+            MonitorOverrides(
+                db_path=db_path,
+                stream_type=None if stream_type is None else stream_type.value,
+                timeout_seconds=timeout,
+            ),
+        )
+        resolved_db_path: Path | None = resolved.db_path
+        if db_path is None and "TIDEMARK_DB" not in os.environ and not _config_declares_paths_db(config_path):
+            resolved_db_path = None
+
         marker_source = monitor_source(
             url,
-            stream_type=stream_type.value,
-            timeout=timeout,
+            stream_type=resolved.stream_type,
+            timeout=resolved.timeout_seconds,
         )
         result = run_monitor(
             marker_source,
-            options=MonitorOptions(
+            options=RuntimeMonitorOptions(
                 source_url=url,
                 marker_filter=None if marker_filter is None else marker_filter.value,
                 json_out=json_out,
-                db_path=db_path,
-                timeout=timeout,
+                db_path=resolved_db_path,
+                timeout=resolved.timeout_seconds,
                 emit_summary=not quiet,
             ),
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
+    except ConfigError as exc:
+        _fatal(str(exc))
     except MonitorSourceError as exc:
         _fatal(str(exc))
     except Exception:
@@ -109,13 +133,14 @@ def run_monitor_command(
 
 def monitor(
     url: UrlArgument,
-    stream_type: StreamTypeOption = CliStreamType.AUTO,
+    stream_type: StreamTypeOption = None,
     json_output: JsonOption = False,
     quiet: QuietOption = False,
     marker_filter: FilterOption = None,
     json_out: JsonOutOption = None,
     timeout: TimeoutOption = None,
     db_path: DbOption = None,
+    config_path: ConfigOption = None,
 ) -> None:
     """Monitor a stream or local source for ad markers."""
     run_monitor_command(
@@ -127,7 +152,24 @@ def monitor(
         json_out=json_out,
         timeout=timeout,
         db_path=db_path,
+        config_path=config_path,
     )
+
+
+def _config_declares_paths_db(config_path: Path | None) -> bool:
+    selected = config_path
+    if selected is None:
+        env_path = os.environ.get("TIDEMARK_CONFIG")
+        if not env_path:
+            return False
+        selected = Path(env_path)
+    try:
+        with Path(selected).expanduser().open("rb") as handle:
+            raw = tomllib.load(handle)
+    except Exception:
+        return False
+    paths = raw.get("paths") if isinstance(raw, dict) else None
+    return isinstance(paths, dict) and "db" in paths
 
 
 def _fatal(message: str) -> None:

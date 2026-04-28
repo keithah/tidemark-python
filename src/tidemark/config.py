@@ -123,6 +123,7 @@ class IngestOverrides:
     fingerprint: bool | None = None
     acoustid_api_key: str | None = None
     lookup_timeout_seconds: float | None = None
+    retention_dir: Path | None = None
 
 
 @dataclass(frozen=True)
@@ -132,6 +133,7 @@ class IngestOptions:
     fingerprint: bool
     acoustid_api_key: str | None
     lookup_timeout_seconds: float | None
+    retention_dir: Path | None
 
 
 @dataclass(frozen=True)
@@ -191,6 +193,7 @@ _ENV_FIELDS: Mapping[str, tuple[str, str]] = MappingProxyType(
         "TIDEMARK_RETENTION_DIR": ("paths", "retention_dir"),
         "TIDEMARK_MONITOR_STREAM_TYPE": ("monitor", "stream_type"),
         "TIDEMARK_MONITOR_TIMEOUT_SECONDS": ("monitor", "timeout_seconds"),
+        "TIDEMARK_INGEST_INCLUDE_MANIFEST_MARKERS": ("ingest", "include_manifest_markers"),
         "TIDEMARK_INGEST_FINGERPRINT": ("ingest", "fingerprint"),
         "TIDEMARK_LOOKUP_TIMEOUT_SECONDS": ("fingerprint", "lookup_timeout_seconds"),
         "ACOUSTID_API_KEY": ("fingerprint", "api_key"),
@@ -266,6 +269,7 @@ def resolve_ingest_options(config: TidemarkConfig, overrides: IngestOverrides | 
             field_path="fingerprint.lookup_timeout_seconds",
             source="CLI" if overrides.lookup_timeout_seconds is not None else "config",
         ),
+        retention_dir=_coalesce(overrides.retention_dir, config.paths.retention_dir),
     )
 
 

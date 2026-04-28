@@ -287,6 +287,35 @@ def test_no_markers_disables_manifest_marker_persistence(monkeypatch: pytest.Mon
     assert calls[0].fingerprint is False
 
 
+def test_markers_option_enables_manifest_marker_persistence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = write_manifest(tmp_path / "playlist.m3u8")
+    transcript = write_transcript(tmp_path / "transcript.json")
+    calls = patch_ingest(
+        monkeypatch,
+        IngestPipelineResult(segment_ids=(11,), transcript_word_ids=(101,), ad_event_ids=(5,), issues=()),
+    )
+
+    result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript), "--markers"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Ingest complete: segments=1 words=1 markers=1 issues=0\n"
+    assert calls[0].include_manifest_markers is True
+
+
+def test_no_fingerprint_option_preserves_fixture_required_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = write_manifest(tmp_path / "playlist.m3u8")
+    calls = patch_ingest(
+        monkeypatch,
+        IngestPipelineResult(segment_ids=(11,), transcript_word_ids=(), ad_event_ids=(), issues=()),
+    )
+
+    result = invoke(["ingest", str(source), "--no-fingerprint"])
+
+    assert result.exit_code == 1
+    assert calls == []
+    assert "--fixture-transcript is required unless --fingerprint is enabled" in result.stderr
+
+
 @pytest.mark.parametrize(
     ("words", "expected_field"),
     [
