@@ -5,9 +5,11 @@ from tidemark.markers.scte35 import decode_scte35_marker
 from tidemark.ingest.hls import (
     HlsScte35Tag,
     direct_cue_marker,
+    iter_hls_manifest_id3_markers,
     iter_hls_manifest_scte35_markers,
     parse_hls_scte35_tag,
 )
+from tests.test_id3_markers import build_id3_tag
 
 
 SPLICE_INSERT_OON_TRUE = "/DAvAAAAAAAA///wFAVIAACef+/+c2nALv4AUsz1AAAAAAAMAQpDVUVJAAABNWLbowo="
@@ -368,5 +370,136 @@ https://private.example/customer/session/segment0.ts?token=secret
 
     message = str(exc_info.value)
     assert "Unable to load HLS segment bytes at segment 0" in message
+    assert "private.example" not in message
+    assert "token=secret" not in message
+
+
+def test_iter_hls_manifest_id3_markers_loads_all_media_segments_without_scte35_tags():
+    first_tag = build_id3_tag(title="First", private_data=b"first-private")
+    second_tag = build_id3_tag(title="Second", private_data=b"second-private")
+    manifest = """
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:42
+#EXTINF:6.0,
+segments/first.ts
+#EXTINF:6.0,
+segments/second.ts
+"""
+    segment_bytes_by_uri = {
+        "https://cdn.example/live/segments/first.ts": b"prefix" + first_tag,
+        "https://cdn.example/live/segments/second.ts": b"prefix" + second_tag,
+    }
+    loaded_uris = []
+
+    def segment_loader(uri):
+        loaded_uris.append(uri)
+        return segment_bytes_by_uri[uri]
+
+    markers = list(
+        iter_hls_manifest_id3_markers(
+            manifest,
+            manifest_url="https://cdn.example/live/playlist.m3u8",
+            segment_loader=segment_loader,
+            timestamp=12.25,
+        )
+    )
+
+    assert loaded_uris == [
+        "https://cdn.example/live/segments/first.ts",
+        "https://cdn.example/live/segments/second.ts",
+    ]
+    assert [(marker.source, marker.tag, marker.segment, marker.timestamp) for marker in markers] == [
+        ("hls_segment", "ID3", 42, 12.25),
+        ("hls_segment", "ID3", 43, 12.25),
+    ]
+    assert [marker.type for marker in markers] == ["ID3", "ID3"]
+    assert [marker.classification for marker in markers] == ["UNKNOWN", "UNKNOWN"]
+    assert all(marker.raw_base64 for marker in markers)
+    assert markers[0].fields["FrameIDs"] == ["PRIV", "TIT2", "TXXX"]
+    assert markers[0].fields["Frames"][1] == {"ID": "TIT2", "Text": ["First"]}
+    assert markers[1].fields["Frames"][1] == {"ID": "TIT2", "Text": ["Second"]}
+
+
+def test_iter_hls_manifest_id3_markers_keeps_relative_segment_uri_without_manifest_url():
+    manifest = """
+#EXTM3U
+segment0.ts
+"""
+    loaded_uris = []
+
+    def segment_loader(uri):
+        loaded_uris.append(uri)
+        return build_id3_tag()
+
+    markers = list(iter_hls_manifest_id3_markers(manifest, segment_loader=segment_loader))
+
+    assert loaded_uris == ["segment0.ts"]
+    assert [marker.segment for marker in markers] == [0]
+
+
+def test_iter_hls_manifest_id3_markers_defaults_malformed_media_sequence_to_zero():
+    manifest = """
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:not-a-number
+segment0.ts
+"""
+
+    markers = list(iter_hls_manifest_id3_markers(manifest, segment_loader=lambda _uri: build_id3_tag()))
+
+    assert [marker.segment for marker in markers] == [0]
+
+
+def test_iter_hls_manifest_id3_markers_rejects_non_bytes_loader_result_without_content():
+    manifest = """
+#EXTM3U
+https://private.example/customer/session/segment0.ts?token=secret
+"""
+
+    def segment_loader(uri):
+        return "private segment text"
+
+    with pytest.raises(TypeError) as exc_info:
+        list(iter_hls_manifest_id3_markers(manifest, segment_loader=segment_loader))
+
+    message = str(exc_info.value)
+    assert message == "HLS segment loader must return bytes"
+    assert "private segment text" not in message
+    assert "private.example" not in message
+    assert "token=secret" not in message
+
+
+def test_iter_hls_manifest_id3_markers_wraps_loader_errors_without_full_url():
+    manifest = """
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:5
+https://private.example/customer/session/segment5.ts?token=secret
+"""
+
+    def segment_loader(uri):
+        raise RuntimeError(f"load failed for {uri}")
+
+    with pytest.raises(ValueError) as exc_info:
+        list(iter_hls_manifest_id3_markers(manifest, segment_loader=segment_loader))
+
+    message = str(exc_info.value)
+    assert message == "Unable to load HLS segment bytes at segment 5"
+    assert "private.example" not in message
+    assert "token=secret" not in message
+
+
+def test_iter_hls_manifest_id3_markers_wraps_decode_errors_without_payload_or_url():
+    manifest = """
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:9
+https://private.example/customer/session/segment9.ts?token=secret
+"""
+    private_bytes = b"ID3\x04\x00\x00\x00\x00\x00\x20private-secret"
+
+    with pytest.raises(ValueError) as exc_info:
+        list(iter_hls_manifest_id3_markers(manifest, segment_loader=lambda _uri: private_bytes))
+
+    message = str(exc_info.value)
+    assert message == "Unable to decode hls_segment ID3 markers at segment 9"
+    assert "private-secret" not in message
     assert "private.example" not in message
     assert "token=secret" not in message

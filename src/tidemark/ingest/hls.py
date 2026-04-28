@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from collections.abc import Callable, Iterator
 from urllib.parse import urljoin
 
+from tidemark.markers.id3 import decode_id3_markers_from_segment_bytes
 from tidemark.markers.models import AdMarker
 from tidemark.markers.scte35 import decode_scte35_marker, decode_scte35_markers_from_mpegts
 
@@ -133,6 +134,41 @@ def iter_hls_manifest_scte35_markers(
         current_sequence += 1
 
 
+def iter_hls_manifest_id3_markers(
+    manifest_text: str,
+    *,
+    segment_loader: Callable[[str], bytes],
+    manifest_url: str | None = None,
+    timestamp: float = 0.0,
+) -> Iterator[AdMarker]:
+    """Yield ID3 markers decoded from every media segment URI in an HLS manifest.
+
+    Segment loading and decode failures are wrapped with redacted phase and
+    segment context only; raw bytes, URLs, and parsed private frame data are not
+    included in wrapper messages.
+    """
+    current_sequence = 0
+
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                current_sequence = _parse_media_sequence(line)
+            continue
+
+        yield from _id3_markers_from_segment_bytes(
+            line,
+            segment_loader=segment_loader,
+            manifest_url=manifest_url,
+            segment=current_sequence,
+            timestamp=timestamp,
+        )
+        current_sequence += 1
+
+
 def direct_cue_marker(
     tag: str,
     fields: dict[str, str],
@@ -200,6 +236,35 @@ def _markers_from_segment_bytes(
         )
     except ValueError as exc:
         raise ValueError(f"Unable to decode hls_segment SCTE-35 markers at segment {segment}") from exc
+
+
+def _id3_markers_from_segment_bytes(
+    uri: str,
+    *,
+    segment_loader: Callable[[str], bytes],
+    manifest_url: str | None,
+    segment: int,
+    timestamp: float,
+) -> Iterator[AdMarker]:
+    resolved_uri = urljoin(manifest_url, uri) if manifest_url is not None else uri
+    try:
+        data = segment_loader(resolved_uri)
+    except Exception as exc:
+        raise ValueError(f"Unable to load HLS segment bytes at segment {segment}") from exc
+
+    if not isinstance(data, bytes):
+        raise TypeError("HLS segment loader must return bytes")
+
+    try:
+        yield from decode_id3_markers_from_segment_bytes(
+            data,
+            source="hls_segment",
+            tag="ID3",
+            segment=segment,
+            timestamp=timestamp,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Unable to decode hls_segment ID3 markers at segment {segment}") from exc
 
 
 def _parse_media_sequence(line: str) -> int:
