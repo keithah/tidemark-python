@@ -19,6 +19,17 @@ class AcoustIDLookupResult:
     lookup_source: str
 
 
+@dataclass(frozen=True)
+class FingerprintIdentificationResult:
+    """Stored lookup outcome for one fingerprint/segment identification."""
+
+    lookup_source: str
+    cache_hit: bool
+    cache_fingerprint: str
+    song_id: int
+    lookup_result: AcoustIDLookupResult
+
+
 class AcoustIDLookupError(ValueError):
     """Redacted lookup failure with stable phase/status/sequence context."""
 

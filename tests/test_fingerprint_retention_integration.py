@@ -13,7 +13,13 @@ import imageio_ffmpeg
 import pytest
 
 from tidemark.audio import decode_segment_audio
-from tidemark.fingerprint import FingerprintError, fingerprint_audio_chunk, write_retained_audio
+from tidemark.fingerprint import (
+    AcoustIDLookupResult,
+    FingerprintError,
+    fingerprint_audio_chunk,
+    identify_fingerprint,
+    write_retained_audio,
+)
 from tidemark.ingest import resolve_segments
 from tidemark.store import (
     SCHEMA_VERSION,
@@ -21,10 +27,8 @@ from tidemark.store import (
     get_retained_audio,
     get_segment,
     get_song,
-    insert_fingerprint_cache,
     insert_retained_audio,
     insert_segment,
-    insert_song,
     migrate,
 )
 
@@ -132,33 +136,20 @@ def test_decoded_fixture_fingerprints_retains_and_persists_schema_v4_rows(
     fingerprint = fingerprint_audio_chunk(chunk, backend=_fingerprint_backend)
     retained = write_retained_audio(chunk, db_path=db_path)
 
-    song_id = insert_song(
+    lookup_outcome = identify_fingerprint(
         conn,
+        fingerprint,
         segment_id=segment_id,
-        source_url=fingerprint.source_url,
-        segment_sequence=fingerprint.segment_sequence,
-        start_ts=fingerprint.start_ts,
-        duration_seconds=fingerprint.duration_seconds,
-        fingerprint=fingerprint.fingerprint,
-        acoustid_id="acoustid-fixture-1",
-        recording_id="recording-fixture-1",
-        title="Fixture tone",
-        artist="Tidemark tests",
-        album="Generated media",
-        score=0.91,
-        lookup_source="deterministic-test-backend",
-    )
-    insert_fingerprint_cache(
-        conn,
-        fingerprint=fingerprint.fingerprint,
-        acoustid_id="acoustid-fixture-1",
-        recording_id="recording-fixture-1",
-        title="Fixture tone",
-        artist="Tidemark tests",
-        album="Generated media",
-        score=0.91,
-        raw_status="ok",
-        lookup_source="deterministic-test-backend",
+        lookup_adapter=lambda _fingerprint, *, api_key=None, timeout_seconds=None: AcoustIDLookupResult(
+            acoustid_id="acoustid-fixture-1",
+            recording_id="recording-fixture-1",
+            title="Fixture tone",
+            artist="Tidemark tests",
+            album="Generated media",
+            score=0.91,
+            raw_status="ok",
+            lookup_source="deterministic-test-backend",
+        ),
     )
     retained_id = insert_retained_audio(
         conn,
@@ -176,7 +167,7 @@ def test_decoded_fixture_fingerprints_retains_and_persists_schema_v4_rows(
         sha256=retained.sha256,
     )
 
-    stored_song = get_song(conn, song_id)
+    stored_song = get_song(conn, lookup_outcome.song_id)
     stored_cache = get_fingerprint_cache(conn, fingerprint.fingerprint)
     stored_retained = get_retained_audio(conn, retained_id)
 
