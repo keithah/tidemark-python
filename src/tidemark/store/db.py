@@ -16,8 +16,9 @@ from os import PathLike
 from typing import Any
 
 from tidemark.markers import AdMarker
+from tidemark.transcribe import WordToken
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -36,6 +37,22 @@ class SegmentStoreRecord:
     byte_length: int
     sha256: str
     metadata: dict[str, Any] | None
+
+
+@dataclass(frozen=True)
+class TranscriptWordStoreRecord:
+    """Normalized transcript word row returned from the SQLite handoff store."""
+
+    id: int
+    segment_id: int
+    source_url: str
+    segment_sequence: int
+    word_index: int
+    word_text: str
+    start_ts: float
+    end_ts: float
+    confidence: float | None
+    created_at: str
 
 _CREATE_AD_EVENTS_SQL = """
 CREATE TABLE IF NOT EXISTS ad_events (
@@ -85,6 +102,31 @@ CREATE TABLE IF NOT EXISTS segments (
 )
 """
 
+_CREATE_TRANSCRIPT_WORDS_SQL = """
+CREATE TABLE IF NOT EXISTS transcript_words (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id INTEGER NOT NULL,
+    source_url TEXT NOT NULL,
+    segment_sequence INTEGER NOT NULL,
+    word_index INTEGER NOT NULL,
+    word_text TEXT NOT NULL,
+    start_ts REAL NOT NULL,
+    end_ts REAL NOT NULL,
+    confidence REAL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (segment_id) REFERENCES segments(id)
+)
+"""
+
+_CREATE_TRANSCRIPT_WORDS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_transcript_words_segment_order "
+    "ON transcript_words(segment_id, word_index)",
+    "CREATE INDEX IF NOT EXISTS idx_transcript_words_source_time "
+    "ON transcript_words(source_url, start_ts, end_ts)",
+    "CREATE INDEX IF NOT EXISTS idx_transcript_words_word "
+    "ON transcript_words(word_text)",
+)
+
 _INSERT_SEGMENT_SQL = """
 INSERT INTO segments (
     source_url,
@@ -97,6 +139,19 @@ INSERT INTO segments (
     sha256,
     metadata_json
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_INSERT_TRANSCRIPT_WORD_SQL = """
+INSERT INTO transcript_words (
+    segment_id,
+    source_url,
+    segment_sequence,
+    word_index,
+    word_text,
+    start_ts,
+    end_ts,
+    confidence
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
 
@@ -114,6 +169,9 @@ def migrate(conn: sqlite3.Connection) -> None:
     with conn:
         conn.execute(_CREATE_AD_EVENTS_SQL)
         conn.execute(_CREATE_SEGMENTS_SQL)
+        conn.execute(_CREATE_TRANSCRIPT_WORDS_SQL)
+        for statement in _CREATE_TRANSCRIPT_WORDS_INDEX_SQL:
+            conn.execute(statement)
         current_version = conn.execute("PRAGMA user_version").fetchone()[0]
         if current_version < SCHEMA_VERSION:
             conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
@@ -153,28 +211,34 @@ def insert_ad_event(conn: sqlite3.Connection, source_url: str, marker: AdMarker)
     return int(cursor.lastrowid)
 
 
-def _require_non_empty_string(name: str, value: str) -> str:
+def _require_non_empty_string(name: str, value: str, *, function_name: str = "insert_segment") -> str:
     if not isinstance(value, str):
-        raise TypeError(f"insert_segment() {name} must be a non-empty string")
+        raise TypeError(f"{function_name}() {name} must be a non-empty string")
     if not value.strip():
-        raise ValueError(f"insert_segment() {name} must be a non-empty string")
+        raise ValueError(f"{function_name}() {name} must be a non-empty string")
     return value
 
 
-def _require_int(name: str, value: int, *, minimum: int | None = None) -> int:
+def _require_int(name: str, value: int, *, minimum: int | None = None, function_name: str = "insert_segment") -> int:
     if not isinstance(value, int) or isinstance(value, bool):
-        raise TypeError(f"insert_segment() {name} must be an integer")
+        raise TypeError(f"{function_name}() {name} must be an integer")
     if minimum is not None and value < minimum:
-        raise ValueError(f"insert_segment() {name} must be >= {minimum}")
+        raise ValueError(f"{function_name}() {name} must be >= {minimum}")
     return value
 
 
-def _require_number(name: str, value: int | float, *, minimum: float | None = None) -> float:
+def _require_number(
+    name: str,
+    value: int | float,
+    *,
+    minimum: float | None = None,
+    function_name: str = "insert_segment",
+) -> float:
     if not isinstance(value, (int, float)) or isinstance(value, bool):
-        raise TypeError(f"insert_segment() {name} must be a number")
+        raise TypeError(f"{function_name}() {name} must be a number")
     normalized = float(value)
     if minimum is not None and normalized < minimum:
-        raise ValueError(f"insert_segment() {name} must be >= {minimum}")
+        raise ValueError(f"{function_name}() {name} must be >= {minimum}")
     return normalized
 
 
@@ -269,4 +333,108 @@ def get_segment(conn: sqlite3.Connection, row_id: int) -> SegmentStoreRecord | N
         byte_length=int(row[7]),
         sha256=row[8],
         metadata=metadata,
+    )
+
+
+def _normalize_transcript_word(word: WordToken, index: int) -> tuple[int, str, float, float, float | None]:
+    if not isinstance(word, WordToken):
+        raise TypeError("insert_transcript_words() words must contain WordToken values")
+
+    text = _require_non_empty_string("word.text", word.text, function_name="insert_transcript_words")
+    start_ts = _require_number("word.start_ts", word.start_ts, minimum=0, function_name="insert_transcript_words")
+    end_ts = _require_number("word.end_ts", word.end_ts, minimum=0, function_name="insert_transcript_words")
+    if end_ts < start_ts:
+        raise ValueError("insert_transcript_words() word.end_ts must be >= word.start_ts")
+
+    confidence = word.confidence
+    if confidence is not None:
+        confidence = _require_number("word.confidence", confidence, function_name="insert_transcript_words")
+        if confidence < 0 or confidence > 1:
+            raise ValueError("insert_transcript_words() word.confidence must be between 0 and 1")
+
+    return index, text, start_ts, end_ts, confidence
+
+
+def insert_transcript_words(
+    conn: sqlite3.Connection,
+    *,
+    segment_id: int,
+    source_url: str,
+    segment_sequence: int,
+    words: tuple[WordToken, ...],
+) -> tuple[int, ...]:
+    """Insert transcript words for one segment and return their row ids.
+
+    Empty word batches are accepted and return an empty tuple without writing any
+    rows. Validation errors intentionally name only fields and function names;
+    transcript text, URLs, paths, and metadata values are never echoed.
+    """
+    normalized_segment_id = _require_int(
+        "segment_id", segment_id, minimum=0, function_name="insert_transcript_words"
+    )
+    normalized_source_url = _require_non_empty_string(
+        "source_url", source_url, function_name="insert_transcript_words"
+    )
+    normalized_segment_sequence = _require_int(
+        "segment_sequence", segment_sequence, minimum=0, function_name="insert_transcript_words"
+    )
+    if not isinstance(words, tuple):
+        raise TypeError("insert_transcript_words() words must be a tuple of WordToken values")
+
+    normalized_words = tuple(_normalize_transcript_word(word, index) for index, word in enumerate(words))
+    if not normalized_words:
+        return ()
+
+    row_ids: list[int] = []
+    with conn:
+        for word_index, word_text, start_ts, end_ts, confidence in normalized_words:
+            cursor = conn.execute(
+                _INSERT_TRANSCRIPT_WORD_SQL,
+                (
+                    normalized_segment_id,
+                    normalized_source_url,
+                    normalized_segment_sequence,
+                    word_index,
+                    word_text,
+                    start_ts,
+                    end_ts,
+                    confidence,
+                ),
+            )
+            row_ids.append(int(cursor.lastrowid))
+    return tuple(row_ids)
+
+
+def get_transcript_words_for_segment(
+    conn: sqlite3.Connection,
+    segment_id: int,
+) -> tuple[TranscriptWordStoreRecord, ...]:
+    """Fetch transcript words for one segment ordered by their stored word index."""
+    normalized_segment_id = _require_int(
+        "segment_id", segment_id, minimum=0, function_name="get_transcript_words_for_segment"
+    )
+    rows = conn.execute(
+        """
+        SELECT id, segment_id, source_url, segment_sequence, word_index,
+               word_text, start_ts, end_ts, confidence, created_at
+        FROM transcript_words
+        WHERE segment_id = ?
+        ORDER BY word_index ASC, id ASC
+        """,
+        (normalized_segment_id,),
+    ).fetchall()
+    return tuple(
+        TranscriptWordStoreRecord(
+            id=int(row[0]),
+            segment_id=int(row[1]),
+            source_url=row[2],
+            segment_sequence=int(row[3]),
+            word_index=int(row[4]),
+            word_text=row[5],
+            start_ts=float(row[6]),
+            end_ts=float(row[7]),
+            confidence=None if row[8] is None else float(row[8]),
+            created_at=row[9],
+        )
+        for row in rows
     )

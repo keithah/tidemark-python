@@ -51,8 +51,8 @@ def test_migrate_creates_ad_events_and_segments_schema_and_sets_user_version():
 
     migrate(conn)
 
-    assert table_names(conn) == ["ad_events", "segments"]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
+    assert table_names(conn) == ["ad_events", "segments", "transcript_words"]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 3
     assert [row[1] for row in conn.execute("PRAGMA table_info(ad_events)")] == EXPECTED_AD_EVENT_COLUMNS
     assert [row[1] for row in conn.execute("PRAGMA table_info(segments)")] == EXPECTED_SEGMENT_COLUMNS
 
@@ -64,7 +64,7 @@ def test_migrate_is_idempotent_and_does_not_downgrade_newer_user_version():
     conn.execute("PRAGMA user_version = 99")
     migrate(conn)
 
-    assert table_names(conn) == ["ad_events", "segments"]
+    assert table_names(conn) == ["ad_events", "segments", "transcript_words"]
     assert conn.execute("select count(*) from sqlite_master where type = 'table' and name = 'segments'").fetchone()[0] == 1
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 99
 
