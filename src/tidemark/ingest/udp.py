@@ -10,10 +10,18 @@ from __future__ import annotations
 
 import ipaddress
 import socket
+import time
+from collections.abc import Callable, Iterator
 from urllib.parse import urlparse
+
+import threefive
+
+from tidemark.markers.models import AdMarker
+from tidemark.markers.scte35 import marker_from_scte35_cue
 
 UDP_DATAGRAM_SIZE = 1316
 _DEFAULT_INTERFACE_IP = "0.0.0.0"
+_UDP_DECODE_ERROR = "Unable to decode UDP SCTE-35 markers"
 
 
 class UDPAddressError(ValueError):
@@ -125,6 +133,57 @@ class UDPDatagramReader:
             return
         self._closed = True
         self._sock.close()
+
+
+def iter_udp_scte35_markers(
+    url: str,
+    *,
+    timestamp_fn: Callable[[], float] = time.time,
+    show_null: bool = True,
+    timeout: float = 2.0,
+    interface_ip: str = _DEFAULT_INTERFACE_IP,
+    recv_buffer_bytes: int | None = None,
+    datagram_size: int = UDP_DATAGRAM_SIZE,
+) -> Iterator[AdMarker]:
+    """Yield Go-compatible SCTE-35 markers decoded from UDP MPEGTS datagrams.
+
+    Address validation errors remain ``UDPAddressError``. Stream construction,
+    parser, timeout, and malformed MPEGTS/SCTE-35 failures are wrapped in a
+    stable redacted ``ValueError`` with the original exception chained for local
+    debugging.
+    """
+    reader: UDPDatagramReader | None = None
+
+    try:
+        sock = open_udp_socket(
+            url,
+            timeout=timeout,
+            interface_ip=interface_ip,
+            recv_buffer_bytes=recv_buffer_bytes,
+        )
+        reader = UDPDatagramReader(sock, datagram_size=datagram_size)
+        stream = threefive.Stream(reader, show_null=show_null)
+        for cue in stream.decode_next():
+            yield marker_from_scte35_cue(
+                cue,
+                source="udp_multicast",
+                timestamp=timestamp_fn(),
+                raw_base64=_raw_base64_from_cue(cue),
+            )
+    except UDPAddressError:
+        raise
+    except Exception as exc:
+        raise ValueError(_UDP_DECODE_ERROR) from exc
+    finally:
+        if reader is not None:
+            reader.close()
+
+
+def _raw_base64_from_cue(cue: threefive.Cue) -> str | None:
+    try:
+        return cue.encode()
+    except Exception:
+        return None
 
 
 def _is_multicast_host(host: str) -> bool:
