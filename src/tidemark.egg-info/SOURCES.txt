@@ -42,6 +42,7 @@ tests/test_monitor_sources.py
 tests/test_mpegts_ingest.py
 tests/test_parity_normalization.py
 tests/test_scte35_threefive_mapping.py
+tests/test_segment_audio_integration.py
 tests/test_segment_ingest.py
 tests/test_segments_store.py
 tests/test_store_db.py
