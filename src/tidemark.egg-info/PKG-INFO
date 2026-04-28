@@ -6,6 +6,7 @@ Author: tidemark contributors
 License: Proprietary
 Requires-Python: >=3.11
 Description-Content-Type: text/markdown
+Requires-Dist: mutagen>=1.47
 Provides-Extra: dev
 Requires-Dist: pytest; extra == "dev"
 

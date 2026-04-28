@@ -1,3 +1,4 @@
+mutagen>=1.47
 
 [dev]
 pytest

@@ -12,7 +12,7 @@ license = { text = "Proprietary" }
 authors = [
     { name = "tidemark contributors" },
 ]
-dependencies = []
+dependencies = ["mutagen>=1.47"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
