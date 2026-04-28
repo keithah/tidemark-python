@@ -11,10 +11,12 @@ from typing import Annotated
 
 import typer
 
-from tidemark.config import ConfigError, MonitorOverrides, load_config, resolve_monitor_options
+from tidemark.config import ConfigError, MonitorOverrides, default_runtime_dir, load_config, resolve_monitor_options
 from tidemark.monitor import MonitorOptions as RuntimeMonitorOptions
+from tidemark.monitor import MonitorProgress
 from tidemark.monitor import run_monitor
 from tidemark.monitor_sources import MonitorSourceError, monitor_source
+from tidemark.runtime.health import HealthReporter, create_reporter, redact_source_label
 
 
 class CliStreamType(str, Enum):
@@ -102,11 +104,20 @@ def run_monitor_command(
         if db_path is None and "TIDEMARK_DB" not in os.environ and not _config_declares_paths_db(config_path):
             resolved_db_path = None
 
-        marker_source = monitor_source(
-            url,
-            stream_type=resolved.stream_type,
-            timeout=resolved.timeout_seconds,
-        )
+        runtime_dir = Path(config.paths.runtime_dir or default_runtime_dir()).expanduser()
+        reporter = create_reporter(runtime_dir, command="monitor", source=url)
+        _report_start(reporter)
+
+        try:
+            marker_source = monitor_source(
+                url,
+                stream_type=resolved.stream_type,
+                timeout=resolved.timeout_seconds,
+            )
+        except MonitorSourceError as exc:
+            _report_fail(reporter, str(exc), phase="error", reason="source_setup_error", counters=_empty_counters())
+            _fatal(redact_source_label(str(exc)))
+
         result = run_monitor(
             marker_source,
             options=RuntimeMonitorOptions(
@@ -116,13 +127,13 @@ def run_monitor_command(
                 db_path=resolved_db_path,
                 timeout=resolved.timeout_seconds,
                 emit_summary=not quiet,
+                progress_callback=_monitor_progress_callback(reporter),
             ),
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
+        _report_result(reporter, result)
     except ConfigError as exc:
-        _fatal(str(exc))
-    except MonitorSourceError as exc:
         _fatal(str(exc))
     except Exception:
         _fatal("monitor failed")
@@ -154,6 +165,78 @@ def monitor(
         db_path=db_path,
         config_path=config_path,
     )
+
+
+def _empty_counters() -> dict[str, int]:
+    return {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}
+
+
+def _monitor_progress_callback(reporter: HealthReporter):
+    def record(progress: MonitorProgress) -> None:
+        if progress.phase == "running":
+            _report_update(reporter, phase="running", counters=progress.counters)
+        elif progress.phase == "error":
+            _report_fail(
+                reporter,
+                progress.error or progress.reason or "monitor error",
+                phase="error",
+                reason=progress.reason or "error",
+                counters=progress.counters,
+            )
+        else:
+            _report_finish(
+                reporter,
+                phase="completed",
+                reason=progress.reason or "finished",
+                counters=progress.counters,
+            )
+
+    return record
+
+
+def _report_start(reporter: HealthReporter) -> None:
+    try:
+        reporter.start(phase="setup", counters=_empty_counters())
+    except Exception:
+        pass
+
+
+def _report_update(reporter: HealthReporter, *, phase: str, counters: dict[str, int]) -> None:
+    try:
+        reporter.update(phase=phase, counters=counters)
+    except Exception:
+        pass
+
+
+def _report_finish(reporter: HealthReporter, *, phase: str, reason: str, counters: dict[str, int]) -> None:
+    try:
+        reporter.finish(phase=phase, reason=reason, counters=counters)
+    except Exception:
+        pass
+
+
+def _report_fail(reporter: HealthReporter, error: object, *, phase: str, reason: str, counters: dict[str, int]) -> None:
+    try:
+        reporter.fail(error, phase=phase, reason=reason, counters=counters)
+    except Exception:
+        pass
+
+
+def _result_counters(result) -> dict[str, int]:
+    return {
+        "markers_seen": result.markers_seen,
+        "markers_emitted": result.markers_emitted,
+        "markers_filtered": result.markers_filtered,
+        "sink_warnings": result.sink_warnings,
+    }
+
+
+def _report_result(reporter: HealthReporter, result) -> None:
+    counters = _result_counters(result)
+    if result.reason == "error":
+        _report_fail(reporter, result.error or "monitor error", phase="error", reason="error", counters=counters)
+    else:
+        _report_finish(reporter, phase="completed", reason=result.reason, counters=counters)
 
 
 def _config_declares_paths_db(config_path: Path | None) -> bool:

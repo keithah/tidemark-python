@@ -73,6 +73,112 @@ def test_monitor_command_invokes_library_once_with_default_options(monkeypatch: 
     assert options.emit_summary is True
 
 
+class RecordingReporter:
+    def __init__(self, events: list[tuple[str, dict[str, object]]]) -> None:
+        self.events = events
+
+    def start(self, **kwargs):
+        self.events.append(("start", kwargs))
+
+    def update(self, **kwargs):
+        self.events.append(("update", kwargs))
+
+    def finish(self, **kwargs):
+        self.events.append(("finish", kwargs))
+
+    def fail(self, error, **kwargs):
+        self.events.append(("fail", {"error": error, **kwargs}))
+
+
+def test_monitor_command_creates_reporter_before_source_and_passes_progress_callback(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    events: list[tuple[str, dict[str, object]]] = []
+    calls: list[str] = []
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text(f'[paths]\nruntime_dir = "{tmp_path / "runtime"}"\n', encoding="utf-8")
+
+    def fake_create_reporter(runtime_dir, *, command, source, **kwargs):
+        calls.append("create_reporter")
+        assert runtime_dir == tmp_path / "runtime"
+        assert command == "monitor"
+        assert source == "http://example.test/live.m3u8?token=secret"
+        return RecordingReporter(events)
+
+    def fake_monitor_source(source, **kwargs):  # noqa: ARG001
+        calls.append("monitor_source")
+        return iter(())
+
+    def fake_run_monitor(marker_source, *, options: MonitorOptions, stdout, stderr):  # noqa: ARG001
+        calls.append("run_monitor")
+        assert options.progress_callback is not None
+        options.progress_callback(
+            type(
+                "Progress",
+                (),
+                {
+                    "phase": "running",
+                    "reason": None,
+                    "counters": {"markers_seen": 1, "markers_emitted": 1, "markers_filtered": 0, "sink_warnings": 0},
+                    "error": None,
+                },
+            )()
+        )
+        return MonitorResult(reason="eof", markers_seen=1, markers_emitted=1, markers_filtered=0)
+
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.create_reporter", fake_create_reporter)
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.monitor_source", fake_monitor_source)
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.run_monitor", fake_run_monitor)
+
+    result = invoke(["monitor", "http://example.test/live.m3u8?token=secret", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == ""
+    assert result.stderr == ""
+    assert calls == ["create_reporter", "monitor_source", "run_monitor"]
+    assert events == [
+        ("start", {"phase": "setup", "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}}),
+        ("update", {"phase": "running", "counters": {"markers_seen": 1, "markers_emitted": 1, "markers_filtered": 0, "sink_warnings": 0}}),
+        ("finish", {"phase": "completed", "reason": "eof", "counters": {"markers_seen": 1, "markers_emitted": 1, "markers_filtered": 0, "sink_warnings": 0}}),
+    ]
+
+
+def test_monitor_command_records_source_setup_failure_without_leaking_or_changing_fatal_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    from tidemark.monitor_sources import MonitorSourceError
+
+    events: list[tuple[str, dict[str, object]]] = []
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text(f'[paths]\nruntime_dir = "{tmp_path / "runtime"}"\n', encoding="utf-8")
+
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.create_reporter", lambda *args, **kwargs: RecordingReporter(events))
+
+    def fail_source(source, **kwargs):  # noqa: ARG001
+        raise MonitorSourceError("source setup failed: http://example.test/live.m3u8?token=secret")
+
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.monitor_source", fail_source)
+
+    result = invoke(["monitor", "http://example.test/live.m3u8?token=secret", "--config", str(config_path), "--quiet"])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "[tidemark] error:" in result.stderr
+    assert "token=secret" not in result.stderr
+    assert events == [
+        ("start", {"phase": "setup", "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}}),
+        (
+            "fail",
+            {
+                "error": "source setup failed: http://example.test/live.m3u8?token=secret",
+                "phase": "error",
+                "reason": "source_setup_error",
+                "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0},
+            },
+        ),
+    ]
+
+
 def test_root_url_alias_invokes_same_monitor_path(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = patch_success(monkeypatch)
 

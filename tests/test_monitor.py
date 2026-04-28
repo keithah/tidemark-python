@@ -61,6 +61,50 @@ def test_run_monitor_classifies_filters_and_writes_go_compatible_stdout() -> Non
     assert "token=secret" not in stderr.getvalue()
 
 
+def test_run_monitor_progress_callback_observes_running_counters_and_eof_terminal() -> None:
+    events: list[tuple[str, str | None, dict[str, int], str | None]] = []
+    first = marker(tag="#EXT-X-CUE-OUT")
+    second = marker(marker_type="OTHER", tag=None)
+
+    def record(progress) -> None:
+        events.append((progress.phase, progress.reason, dict(progress.counters), progress.error))
+
+    result, stdout, stderr = run_with(
+        [first, second],
+        MonitorOptions(source_url="https://media.example/live.m3u8?token=secret", marker_filter=AD_START, progress_callback=record),
+    )
+
+    assert result.reason == "eof"
+    assert ndjson_lines(stdout) == [first.to_dict()]
+    assert "reason=eof markers=2 emitted=1 filtered=1" in stderr.getvalue()
+    assert events == [
+        ("running", None, {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}, None),
+        ("running", None, {"markers_seen": 1, "markers_emitted": 1, "markers_filtered": 0, "sink_warnings": 0}, None),
+        ("running", None, {"markers_seen": 2, "markers_emitted": 1, "markers_filtered": 1, "sink_warnings": 0}, None),
+        ("completed", "eof", {"markers_seen": 2, "markers_emitted": 1, "markers_filtered": 1, "sink_warnings": 0}, None),
+    ]
+
+
+def test_run_monitor_progress_callback_failures_do_not_change_output_or_result() -> None:
+    calls = 0
+    first = marker(tag="#EXT-X-CUE-OUT")
+
+    def broken_callback(progress) -> None:  # noqa: ARG001
+        nonlocal calls
+        calls += 1
+        raise RuntimeError("health write failed token=secret")
+
+    result, stdout, stderr = run_with(
+        [first],
+        MonitorOptions(source_url="https://media.example/live.m3u8?token=secret", progress_callback=broken_callback),
+    )
+
+    assert result == MonitorResult(reason="eof", markers_seen=1, markers_emitted=1, markers_filtered=0)
+    assert ndjson_lines(stdout) == [first.to_dict()]
+    assert stderr.getvalue() == "[tidemark] completed: reason=eof markers=1 emitted=1 filtered=0\n"
+    assert calls >= 2
+
+
 def test_run_monitor_accepts_callable_marker_source_and_uses_one_classifier_per_run() -> None:
     icy_markers = [
         marker("ICY", tag=None, fields={"StreamTitle": "Morning Show"}),

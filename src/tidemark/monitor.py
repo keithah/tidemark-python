@@ -19,6 +19,20 @@ import tidemark.store.db as db
 
 MonitorReason = Literal["eof", "timeout", "interrupted", "error"]
 MarkerFilter = Literal["all", "ad", "AD_START", "AD_END", "UNKNOWN", "scte35", "id3", "icy"]
+MonitorPhase = Literal["running", "completed", "error"]
+
+
+@dataclass(frozen=True)
+class MonitorProgress:
+    """Best-effort progress snapshot for runtime health observers."""
+
+    phase: MonitorPhase
+    counters: dict[str, int]
+    reason: MonitorReason | None = None
+    error: str | None = None
+
+
+MonitorProgressCallback = Callable[[MonitorProgress], None]
 
 _MARKER_TYPE_FILTERS = {"scte35", "id3", "icy"}
 _VALID_FILTERS = {"all", "ad", AD_START, AD_END, UNKNOWN, *_MARKER_TYPE_FILTERS}
@@ -35,6 +49,7 @@ class MonitorOptions:
     timeout: float | None = None
     clock: Callable[[], float] = time.monotonic
     emit_summary: bool = True
+    progress_callback: MonitorProgressCallback | None = None
 
 
 @dataclass(frozen=True)
@@ -74,43 +89,81 @@ def run_monitor(
 
     normalized_filter = _normalize_filter(active_options.marker_filter)
     if normalized_filter is None:
-        return _fatal_result("invalid marker filter", state, stderr, emit_summary=active_options.emit_summary)
+        return _fatal_result(
+            "invalid marker filter",
+            state,
+            stderr,
+            emit_summary=active_options.emit_summary,
+            progress_callback=active_options.progress_callback,
+        )
 
     json_handle: TextIO | None = None
     db_conn: object | None = None
     try:
         json_handle = _open_json_out(active_options.json_out)
     except Exception:
-        return _fatal_result("json-out setup failed", state, stderr, emit_summary=active_options.emit_summary)
+        return _fatal_result(
+            "json-out setup failed",
+            state,
+            stderr,
+            emit_summary=active_options.emit_summary,
+            progress_callback=active_options.progress_callback,
+        )
 
     try:
         db_conn = _open_db(active_options.db_path)
     except Exception:
         _close_handle(json_handle)
-        return _fatal_result("database setup failed", state, stderr, emit_summary=active_options.emit_summary)
+        return _fatal_result(
+            "database setup failed",
+            state,
+            stderr,
+            emit_summary=active_options.emit_summary,
+            progress_callback=active_options.progress_callback,
+        )
 
     classifier = Classifier()
     start_time = active_options.clock()
+    _notify_progress(active_options.progress_callback, "running", state)
 
     try:
         iterator = _iter_marker_source(marker_source)
 
         while True:
             if _timed_out(active_options, start_time):
-                return _finish("timeout", state, stderr, emit_summary=active_options.emit_summary)
+                return _finish(
+                    "timeout",
+                    state,
+                    stderr,
+                    emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
+                )
 
             try:
                 item = next(iterator)
             except StopIteration:
-                return _finish("eof", state, stderr, emit_summary=active_options.emit_summary)
+                return _finish(
+                    "eof",
+                    state,
+                    stderr,
+                    emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
+                )
             except KeyboardInterrupt:
-                return _finish("interrupted", state, stderr, emit_summary=active_options.emit_summary)
+                return _finish(
+                    "interrupted",
+                    state,
+                    stderr,
+                    emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
+                )
             except Exception:
                 return _fatal_result(
                     "marker iterator failed",
                     state,
                     stderr,
                     emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
                 )
 
             if not isinstance(item, AdMarker):
@@ -119,12 +172,14 @@ def run_monitor(
                     state,
                     stderr,
                     emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
                 )
 
             state.markers_seen += 1
             classifier.classify(item)
             if not _matches_filter(item, normalized_filter):
                 state.markers_filtered += 1
+                _notify_progress(active_options.progress_callback, "running", state)
                 continue
 
             try:
@@ -135,6 +190,7 @@ def run_monitor(
                     state,
                     stderr,
                     emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
                 )
 
             try:
@@ -142,7 +198,13 @@ def run_monitor(
                 stdout.write("\n")
                 stdout.flush()
             except Exception:
-                return _fatal_result("stdout write failed", state, stderr, emit_summary=active_options.emit_summary)
+                return _fatal_result(
+                    "stdout write failed",
+                    state,
+                    stderr,
+                    emit_summary=active_options.emit_summary,
+                    progress_callback=active_options.progress_callback,
+                )
 
             state.markers_emitted += 1
             if json_handle is not None:
@@ -160,6 +222,8 @@ def run_monitor(
                 except Exception:
                     state.sink_warnings += 1
                     _warn("database write failed", stderr)
+
+            _notify_progress(active_options.progress_callback, "running", state)
     finally:
         _close_handle(json_handle)
         _close_handle(db_conn)
@@ -212,9 +276,16 @@ def _matches_filter(marker: AdMarker, marker_filter: str) -> bool:
     return marker.classification == marker_filter
 
 
-def _fatal_result(message: str, state: _MonitorState, stderr: TextIO, *, emit_summary: bool) -> MonitorResult:
+def _fatal_result(
+    message: str,
+    state: _MonitorState,
+    stderr: TextIO,
+    *,
+    emit_summary: bool,
+    progress_callback: MonitorProgressCallback | None = None,
+) -> MonitorResult:
     _error(message, stderr)
-    return _finish("error", state, stderr, error=message, emit_summary=emit_summary)
+    return _finish("error", state, stderr, error=message, emit_summary=emit_summary, progress_callback=progress_callback)
 
 
 def _finish(
@@ -224,7 +295,10 @@ def _finish(
     *,
     error: str | None = None,
     emit_summary: bool,
+    progress_callback: MonitorProgressCallback | None = None,
 ) -> MonitorResult:
+    phase: MonitorPhase = "error" if reason == "error" else "completed"
+    _notify_progress(progress_callback, phase, state, reason=reason, error=error)
     if emit_summary:
         stderr.write(
             "[tidemark] completed: "
@@ -239,6 +313,34 @@ def _finish(
         sink_warnings=state.sink_warnings,
         error=error,
     )
+
+
+def _notify_progress(
+    progress_callback: MonitorProgressCallback | None,
+    phase: MonitorPhase,
+    state: _MonitorState,
+    *,
+    reason: MonitorReason | None = None,
+    error: str | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(
+            MonitorProgress(
+                phase=phase,
+                reason=reason,
+                error=error,
+                counters={
+                    "markers_seen": state.markers_seen,
+                    "markers_emitted": state.markers_emitted,
+                    "markers_filtered": state.markers_filtered,
+                    "sink_warnings": state.sink_warnings,
+                },
+            )
+        )
+    except Exception:
+        pass
 
 
 def _error(message: str, stderr: TextIO) -> None:
@@ -257,4 +359,13 @@ def _close_handle(handle: object | None) -> None:
         close()
 
 
-__all__ = ["MarkerFilter", "MonitorOptions", "MonitorReason", "MonitorResult", "run_monitor"]
+__all__ = [
+    "MarkerFilter",
+    "MonitorOptions",
+    "MonitorPhase",
+    "MonitorProgress",
+    "MonitorProgressCallback",
+    "MonitorReason",
+    "MonitorResult",
+    "run_monitor",
+]
