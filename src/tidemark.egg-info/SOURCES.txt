@@ -9,6 +9,9 @@ src/tidemark.egg-info/dependency_links.txt
 src/tidemark.egg-info/entry_points.txt
 src/tidemark.egg-info/requires.txt
 src/tidemark.egg-info/top_level.txt
+src/tidemark/audio/__init__.py
+src/tidemark/audio/decoder.py
+src/tidemark/audio/models.py
 src/tidemark/cli/__init__.py
 src/tidemark/cli/cmd_monitor.py
 src/tidemark/cli/main.py
@@ -16,6 +19,7 @@ src/tidemark/ingest/__init__.py
 src/tidemark/ingest/hls.py
 src/tidemark/ingest/icy.py
 src/tidemark/ingest/mpegts.py
+src/tidemark/ingest/segments.py
 src/tidemark/ingest/udp.py
 src/tidemark/markers/__init__.py
 src/tidemark/markers/classifier.py
@@ -24,6 +28,7 @@ src/tidemark/markers/models.py
 src/tidemark/markers/scte35.py
 src/tidemark/store/__init__.py
 src/tidemark/store/db.py
+tests/test_audio_decoder.py
 tests/test_classifier.py
 tests/test_cli_integration.py
 tests/test_cli_monitor.py
@@ -37,6 +42,7 @@ tests/test_monitor_sources.py
 tests/test_mpegts_ingest.py
 tests/test_parity_normalization.py
 tests/test_scte35_threefive_mapping.py
+tests/test_segment_ingest.py
 tests/test_segments_store.py
 tests/test_store_db.py
 tests/test_udp_ingest.py

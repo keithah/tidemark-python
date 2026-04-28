@@ -12,7 +12,7 @@ license = { text = "Proprietary" }
 authors = [
     { name = "tidemark contributors" },
 ]
-dependencies = ["mutagen>=1.47", "typer>=0.12"]
+dependencies = ["imageio-ffmpeg>=0.5", "mutagen>=1.47", "typer>=0.12"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
