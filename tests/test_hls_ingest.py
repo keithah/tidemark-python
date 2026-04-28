@@ -266,3 +266,107 @@ https://private.example/customer/session/segment5.ts?token=secret
     assert private_payload not in message
     assert "private.example" not in message
     assert "origin.example" not in message
+
+
+def test_iter_hls_manifest_scte35_markers_loads_resolved_segments_after_manifest_tags(monkeypatch):
+    manifest = f"""
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:21
+#EXT-X-CUE-OUT:DURATION=30
+segments/segment21.ts
+"""
+    loaded_uris = []
+
+    def segment_loader(uri):
+        loaded_uris.append(uri)
+        return b"segment bytes"
+
+    def fake_decode(data, *, source, tag=None, segment=None, timestamp=0.0):
+        assert data == b"segment bytes"
+        assert source == "hls_segment"
+        assert tag is None
+        assert segment == 21
+        assert timestamp == 6.25
+        return [
+            AdMarker(
+                type="SCTE35",
+                classification="UNKNOWN",
+                source=source,
+                tag=tag,
+                segment=segment,
+                timestamp=timestamp,
+            )
+        ]
+
+    monkeypatch.setattr("tidemark.ingest.hls.decode_scte35_markers_from_mpegts", fake_decode)
+
+    markers = list(
+        iter_hls_manifest_scte35_markers(
+            manifest,
+            manifest_url="https://cdn.example/live/master/playlist.m3u8",
+            segment_loader=segment_loader,
+            timestamp=6.25,
+        )
+    )
+
+    assert loaded_uris == ["https://cdn.example/live/master/segments/segment21.ts"]
+    assert [(marker.source, marker.segment, marker.classification) for marker in markers] == [
+        ("hls_manifest", 21, "UNKNOWN"),
+        ("hls_segment", 21, "UNKNOWN"),
+    ]
+
+
+def test_iter_hls_manifest_scte35_markers_keeps_relative_segment_uri_without_manifest_url(monkeypatch):
+    manifest = """
+#EXTM3U
+segment0.ts
+"""
+    loaded_uris = []
+
+    def segment_loader(uri):
+        loaded_uris.append(uri)
+        return b""
+
+    monkeypatch.setattr(
+        "tidemark.ingest.hls.decode_scte35_markers_from_mpegts",
+        lambda data, **kwargs: [],
+    )
+
+    assert list(iter_hls_manifest_scte35_markers(manifest, segment_loader=segment_loader)) == []
+    assert loaded_uris == ["segment0.ts"]
+
+
+def test_iter_hls_manifest_scte35_markers_rejects_non_bytes_loader_result_without_content(monkeypatch):
+    manifest = """
+#EXTM3U
+https://private.example/customer/session/segment0.ts?token=secret
+"""
+
+    def segment_loader(uri):
+        return "private segment text"
+
+    with pytest.raises(TypeError) as exc_info:
+        list(iter_hls_manifest_scte35_markers(manifest, segment_loader=segment_loader))
+
+    message = str(exc_info.value)
+    assert "bytes" in message
+    assert "private segment text" not in message
+    assert "private.example" not in message
+
+
+def test_iter_hls_manifest_scte35_markers_wraps_loader_errors_without_full_url():
+    manifest = """
+#EXTM3U
+https://private.example/customer/session/segment0.ts?token=secret
+"""
+
+    def segment_loader(uri):
+        raise RuntimeError(f"load failed for {uri}")
+
+    with pytest.raises(ValueError) as exc_info:
+        list(iter_hls_manifest_scte35_markers(manifest, segment_loader=segment_loader))
+
+    message = str(exc_info.value)
+    assert "Unable to load HLS segment bytes at segment 0" in message
+    assert "private.example" not in message
+    assert "token=secret" not in message

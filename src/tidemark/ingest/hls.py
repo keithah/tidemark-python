@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from collections.abc import Iterator
-from typing import Any
+from collections.abc import Callable, Iterator
+from urllib.parse import urljoin
 
 from tidemark.markers.models import AdMarker
-from tidemark.markers.scte35 import decode_scte35_marker
+from tidemark.markers.scte35 import decode_scte35_marker, decode_scte35_markers_from_mpegts
 
 
 @dataclass(frozen=True)
@@ -84,19 +84,16 @@ def parse_hls_scte35_tag(line: str) -> HlsScte35Tag | None:
 def iter_hls_manifest_scte35_markers(
     manifest_text: str,
     *,
-    segment_loader: Any = None,
+    segment_loader: Callable[[str], bytes] | None = None,
     manifest_url: str | None = None,
     timestamp: float = 0.0,
 ) -> Iterator[AdMarker]:
-    """Yield SCTE-35 markers attached to the next media segment in a manifest.
+    """Yield SCTE-35 markers attached to media segments in a manifest.
 
-    ``segment_loader`` and ``manifest_url`` are accepted for the broader ingest API
-    shape, but this manifest-only pass deliberately avoids loading segment bytes.
-    Decode failures are wrapped with parser/segment context while preserving the
-    lower-level payload redaction contract.
+    Manifest SCTE-35 tags are yielded before any SCTE-35 cues discovered inside
+    the same media segment bytes. Decode/load failures are wrapped with segment
+    context while preserving payload, byte, and source URL redaction.
     """
-    del segment_loader, manifest_url
-
     current_sequence = 0
     pending_tags: list[HlsScte35Tag] = []
 
@@ -123,6 +120,15 @@ def iter_hls_manifest_scte35_markers(
                     timestamp=timestamp,
                 )
             pending_tags = []
+
+        if segment_loader is not None:
+            yield from _markers_from_segment_bytes(
+                line,
+                segment_loader=segment_loader,
+                manifest_url=manifest_url,
+                segment=current_sequence,
+                timestamp=timestamp,
+            )
 
         current_sequence += 1
 
@@ -166,6 +172,34 @@ def _marker_from_pending_tag(tag: HlsScte35Tag, *, segment: int, timestamp: floa
         raise ValueError(
             f"Unable to decode hls_manifest SCTE-35 marker for tag {tag.tag} at segment {segment}"
         ) from exc
+
+
+def _markers_from_segment_bytes(
+    uri: str,
+    *,
+    segment_loader: Callable[[str], bytes],
+    manifest_url: str | None,
+    segment: int,
+    timestamp: float,
+) -> Iterator[AdMarker]:
+    resolved_uri = urljoin(manifest_url, uri) if manifest_url is not None else uri
+    try:
+        data = segment_loader(resolved_uri)
+    except Exception as exc:
+        raise ValueError(f"Unable to load HLS segment bytes at segment {segment}") from exc
+
+    if not isinstance(data, bytes):
+        raise TypeError("HLS segment loader must return bytes")
+
+    try:
+        yield from decode_scte35_markers_from_mpegts(
+            data,
+            source="hls_segment",
+            segment=segment,
+            timestamp=timestamp,
+        )
+    except ValueError as exc:
+        raise ValueError(f"Unable to decode hls_segment SCTE-35 markers at segment {segment}") from exc
 
 
 def _parse_media_sequence(line: str) -> int:

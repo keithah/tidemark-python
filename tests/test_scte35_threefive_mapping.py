@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 import threefive
 
-from tidemark.markers import AdMarker, decode_scte35_marker
+from tidemark.markers import AdMarker, decode_scte35_marker, decode_scte35_markers_from_mpegts
 
 
 SPLICE_INSERT_OON_TRUE = "/DAvAAAAAAAA///wFAVIAACef+/+c2nALv4AUsz1AAAAAAAMAQpDVUVJAAABNWLbowo="
@@ -135,6 +135,72 @@ def test_decode_splice_null_hex_marker_matches_base64_contract():
     assert hex_dict["Descriptors"] == base64_dict["Descriptors"]
     assert hex_dict["Fields"] == base64_dict["Fields"]
     assert hex_dict["PTS"] == base64_dict["PTS"]
+
+
+def test_decode_scte35_markers_from_mpegts_returns_empty_list_for_empty_segment_bytes():
+    assert decode_scte35_markers_from_mpegts(b"") == []
+
+
+def test_decode_scte35_markers_from_mpegts_maps_stream_cues(monkeypatch):
+    class FakeStream:
+        def __init__(self, stream_data):
+            assert stream_data.read() == b"mpegts bytes"
+
+        def decode(self, callback):
+            cue = threefive.Cue(SPLICE_NULL)
+            assert cue.decode() is True
+            callback(cue)
+            return True
+
+    monkeypatch.setattr(threefive, "Stream", FakeStream)
+
+    markers = decode_scte35_markers_from_mpegts(
+        b"mpegts bytes",
+        source="hls_segment",
+        tag=None,
+        segment=42,
+        timestamp=9.5,
+    )
+
+    assert len(markers) == 1
+    marker = markers[0]
+    assert marker.source == "hls_segment"
+    assert marker.tag is None
+    assert marker.segment == 42
+    assert marker.timestamp == 9.5
+    assert marker.classification == "UNKNOWN"
+    assert marker.raw_base64 is not None
+    assert decode_scte35_marker(marker.raw_base64, source="fixture").fields == {
+        "CommandName": "Splice Null"
+    }
+    assert marker.fields == {"CommandName": "Splice Null"}
+
+
+def test_decode_scte35_markers_from_mpegts_rejects_non_bytes_without_leaking_content():
+    with pytest.raises(TypeError) as exc_info:
+        decode_scte35_markers_from_mpegts("private segment text")  # type: ignore[arg-type]
+
+    message = str(exc_info.value)
+    assert "bytes" in message
+    assert "private segment text" not in message
+
+
+def test_decode_scte35_markers_from_mpegts_wraps_stream_failures_without_leaking_bytes(monkeypatch):
+    class FailingStream:
+        def __init__(self, stream_data):
+            stream_data.read()
+
+        def decode(self, callback):
+            raise RuntimeError("private raw bytes were malformed")
+
+    monkeypatch.setattr(threefive, "Stream", FailingStream)
+
+    with pytest.raises(ValueError) as exc_info:
+        decode_scte35_markers_from_mpegts(b"private raw bytes")
+
+    message = str(exc_info.value)
+    assert "Unable to decode SCTE-35 markers from MPEGTS segment bytes" in message
+    assert "private raw bytes" not in message
 
 
 @pytest.mark.parametrize(

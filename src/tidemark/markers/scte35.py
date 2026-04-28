@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import base64
+import io
 from typing import Any
 
 import threefive
@@ -47,6 +48,54 @@ def decode_scte35_marker(
     )
 
 
+def decode_scte35_markers_from_mpegts(
+    data: bytes,
+    *,
+    source: str = "hls_segment",
+    tag: str | None = None,
+    segment: int | None = None,
+    timestamp: float = 0.0,
+) -> list[AdMarker]:
+    """Decode SCTE-35 cues from MPEGTS segment bytes into ``AdMarker`` records.
+
+    Dependency failures deliberately omit byte contents because callers may pass
+    private transport stream segments or URL-loaded customer media.
+    """
+    if not isinstance(data, bytes):
+        raise TypeError("SCTE-35 MPEGTS segment data must be bytes")
+    if not data:
+        return []
+
+    cues: list[threefive.Cue] = []
+
+    def collect_cue(cue: threefive.Cue) -> None:
+        cues.append(cue)
+
+    try:
+        stream = threefive.Stream(io.BytesIO(data))
+        stream.decode(collect_cue)
+    except Exception as exc:
+        raise ValueError("Unable to decode SCTE-35 markers from MPEGTS segment bytes") from exc
+
+    markers: list[AdMarker] = []
+    for cue in cues:
+        try:
+            raw_base64 = cue.encode()
+        except Exception:
+            raw_base64 = None
+        markers.append(
+            _cue_to_ad_marker(
+                cue,
+                source=source,
+                tag=tag,
+                segment=segment,
+                timestamp=timestamp,
+                raw_base64=raw_base64,
+            )
+        )
+    return markers
+
+
 def _normalize_payload_text(payload: str | bytes) -> tuple[str, str]:
     if isinstance(payload, bytes):
         try:
@@ -85,7 +134,7 @@ def _cue_to_ad_marker(
     tag: str | None,
     segment: int | None,
     timestamp: float,
-    raw_base64: str,
+    raw_base64: str | None,
 ) -> AdMarker:
     command = _get_command(cue)
     descriptors = _get_descriptors(cue)
