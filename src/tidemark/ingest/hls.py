@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from collections.abc import Iterator
+from typing import Any
 
 from tidemark.markers.models import AdMarker
+from tidemark.markers.scte35 import decode_scte35_marker
 
 
 @dataclass(frozen=True)
@@ -78,6 +81,52 @@ def parse_hls_scte35_tag(line: str) -> HlsScte35Tag | None:
     return None
 
 
+def iter_hls_manifest_scte35_markers(
+    manifest_text: str,
+    *,
+    segment_loader: Any = None,
+    manifest_url: str | None = None,
+    timestamp: float = 0.0,
+) -> Iterator[AdMarker]:
+    """Yield SCTE-35 markers attached to the next media segment in a manifest.
+
+    ``segment_loader`` and ``manifest_url`` are accepted for the broader ingest API
+    shape, but this manifest-only pass deliberately avoids loading segment bytes.
+    Decode failures are wrapped with parser/segment context while preserving the
+    lower-level payload redaction contract.
+    """
+    del segment_loader, manifest_url
+
+    current_sequence = 0
+    pending_tags: list[HlsScte35Tag] = []
+
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+
+        if line.startswith("#"):
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                current_sequence = _parse_media_sequence(line)
+                continue
+
+            parsed = parse_hls_scte35_tag(line)
+            if parsed is not None:
+                pending_tags.append(parsed)
+            continue
+
+        if pending_tags:
+            for pending_tag in pending_tags:
+                yield _marker_from_pending_tag(
+                    pending_tag,
+                    segment=current_sequence,
+                    timestamp=timestamp,
+                )
+            pending_tags = []
+
+        current_sequence += 1
+
+
 def direct_cue_marker(
     tag: str,
     fields: dict[str, str],
@@ -94,6 +143,38 @@ def direct_cue_marker(
         fields=dict(fields),
         timestamp=timestamp,
     )
+
+
+def _marker_from_pending_tag(tag: HlsScte35Tag, *, segment: int, timestamp: float) -> AdMarker:
+    if tag.payload is None:
+        return direct_cue_marker(
+            tag.tag,
+            tag.direct_fields,
+            segment=segment,
+            timestamp=timestamp,
+        )
+
+    try:
+        return decode_scte35_marker(
+            tag.payload,
+            source="hls_manifest",
+            tag=tag.tag,
+            segment=segment,
+            timestamp=timestamp,
+        )
+    except ValueError as exc:
+        raise ValueError(
+            f"Unable to decode hls_manifest SCTE-35 marker for tag {tag.tag} at segment {segment}"
+        ) from exc
+
+
+def _parse_media_sequence(line: str) -> int:
+    value = line.removeprefix("#EXT-X-MEDIA-SEQUENCE:").strip()
+    try:
+        sequence = int(value)
+    except ValueError:
+        return 0
+    return max(sequence, 0)
 
 
 def _payload_tag(tag: str, payload: str | None, attributes: dict[str, str]) -> HlsScte35Tag | None:

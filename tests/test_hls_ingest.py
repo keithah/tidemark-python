@@ -2,7 +2,12 @@ import pytest
 
 from tidemark.markers import AdMarker
 from tidemark.markers.scte35 import decode_scte35_marker
-from tidemark.ingest.hls import HlsScte35Tag, direct_cue_marker, parse_hls_scte35_tag
+from tidemark.ingest.hls import (
+    HlsScte35Tag,
+    direct_cue_marker,
+    iter_hls_manifest_scte35_markers,
+    parse_hls_scte35_tag,
+)
 
 
 SPLICE_INSERT_OON_TRUE = "/DAvAAAAAAAA///wFAVIAACef+/+c2nALv4AUsz1AAAAAAAMAQpDVUVJAAABNWLbowo="
@@ -154,3 +159,110 @@ def test_direct_cue_marker_uses_ad_marker_contract_without_binary_decode(monkeyp
 )
 def test_parse_unsupported_or_empty_scte_lines_returns_none(line):
     assert parse_hls_scte35_tag(line) is None
+
+
+def test_iter_hls_manifest_scte35_markers_attaches_binary_tag_to_next_media_sequence():
+    manifest = f"""
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:7
+#EXTINF:6.0,
+#EXT-X-SCTE35:{SPLICE_INSERT_OON_TRUE}
+segment7.ts
+#EXTINF:6.0,
+segment8.ts
+"""
+
+    markers = list(iter_hls_manifest_scte35_markers(manifest, timestamp=11.5))
+
+    assert len(markers) == 1
+    marker = markers[0]
+    assert marker.source == "hls_manifest"
+    assert marker.tag == "#EXT-X-SCTE35"
+    assert marker.segment == 7
+    assert marker.timestamp == 11.5
+    assert marker.raw_base64 == SPLICE_INSERT_OON_TRUE
+    assert marker.fields["CommandName"] == "Splice Insert"
+
+
+def test_iter_hls_manifest_scte35_markers_attaches_multiple_pending_tags_to_one_segment():
+    manifest = f"""
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:4
+#EXT-X-CUE-OUT:DURATION=30,ELAPSED=0
+#EXT-X-DATERANGE:ID="ad",SCTE35-OUT={SPLICE_NULL_HEX}
+segment4.ts
+"""
+
+    markers = list(iter_hls_manifest_scte35_markers(manifest, timestamp=3.25))
+
+    assert [marker.tag for marker in markers] == ["#EXT-X-CUE-OUT", "#EXT-X-DATERANGE"]
+    assert [marker.segment for marker in markers] == [4, 4]
+    assert markers[0].source == "hls_manifest"
+    assert markers[0].classification == "UNKNOWN"
+    assert markers[0].fields == {"DURATION": "30", "ELAPSED": "0"}
+    assert markers[0].raw_base64 is None
+    assert markers[0].timestamp == 3.25
+    assert markers[1].raw_base64 == "/DARAAAAAAAAAP/wAAAAAHpPGuQ="
+
+
+def test_iter_hls_manifest_scte35_markers_resets_pending_tags_after_media_segment():
+    manifest = f"""
+#EXTM3U
+#EXT-X-CUE-OUT:DURATION=15
+segment0.ts
+segment1.ts
+#EXT-X-CUE-IN
+segment2.ts
+"""
+
+    markers = list(iter_hls_manifest_scte35_markers(manifest))
+
+    assert [(marker.tag, marker.segment, marker.fields) for marker in markers] == [
+        ("#EXT-X-CUE-OUT", 0, {"DURATION": "15"}),
+        ("#EXT-X-CUE-IN", 2, {}),
+    ]
+
+
+def test_iter_hls_manifest_scte35_markers_ignores_orphan_tags_without_media_uri():
+    manifest = f"""
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:12
+#EXT-X-CUE-OUT:DURATION=30
+#EXT-X-SCTE35:{SPLICE_INSERT_OON_TRUE}
+"""
+
+    assert list(iter_hls_manifest_scte35_markers(manifest)) == []
+
+
+def test_iter_hls_manifest_scte35_markers_defaults_malformed_media_sequence_to_zero():
+    manifest = """
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:not-a-number
+#EXT-X-CUE-IN
+segment0.ts
+"""
+
+    markers = list(iter_hls_manifest_scte35_markers(manifest))
+
+    assert [(marker.tag, marker.segment) for marker in markers] == [("#EXT-X-CUE-IN", 0)]
+
+
+def test_iter_hls_manifest_scte35_markers_raises_redacted_error_for_malformed_binary_payload():
+    private_payload = "not-valid-scte35-private-payload"
+    manifest = f"""
+#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:5
+#EXT-X-SCTE35:{private_payload}
+https://private.example/customer/session/segment5.ts?token=secret
+"""
+
+    with pytest.raises(ValueError) as exc_info:
+        list(iter_hls_manifest_scte35_markers(manifest, manifest_url="https://origin.example/live/private.m3u8"))
+
+    message = str(exc_info.value)
+    assert "hls_manifest" in message
+    assert "#EXT-X-SCTE35" in message
+    assert "segment 5" in message
+    assert private_payload not in message
+    assert "private.example" not in message
+    assert "origin.example" not in message
