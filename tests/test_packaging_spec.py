@@ -37,8 +37,9 @@ def test_pyinstaller_spec_freezes_onefile_console_binary_and_collects_runtime_da
     source = SPEC.read_text()
 
     assert "scripts/tidemark_pyinstaller_entry.py" in source
-    assert "pathex=[\"src\"]" in source or "pathex=['src']" in source
+    assert "pathex=[\"src\", threefive_source_root]" in source or "pathex=['src', threefive_source_root]" in source
     assert "collect_submodules(\"tidemark\")" in source or "collect_submodules('tidemark')" in source
+    assert "threefive" in source
     assert "collect_all(\"imageio_ffmpeg\")" in source or "collect_all('imageio_ffmpeg')" in source
     assert "name=\"tidemark\"" in source or "name='tidemark'" in source
     assert "console=True" in source
