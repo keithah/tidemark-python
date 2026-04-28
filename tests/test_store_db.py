@@ -55,6 +55,23 @@ def test_migrate_is_idempotent_and_does_not_downgrade_user_version():
     assert conn.execute("PRAGMA user_version").fetchone()[0] == 99
 
 
+def test_migrate_creates_idempotent_segment_restart_evidence_index():
+    conn = sqlite3.connect(":memory:")
+
+    migrate(conn)
+    migrate(conn)
+
+    indexes = conn.execute("PRAGMA index_list(segments)").fetchall()
+    matching = [row for row in indexes if row[1] == "idx_segments_restart_evidence"]
+    assert len(matching) == 1
+    assert [row[2] for row in conn.execute("PRAGMA index_info(idx_segments_restart_evidence)")] == [
+        "source_url",
+        "sequence",
+        "sha256",
+    ]
+    assert not matching[0][2]
+
+
 def test_insert_ad_event_writes_normalized_columns_and_raw_marker_json():
     conn = sqlite3.connect(":memory:")
     migrate(conn)

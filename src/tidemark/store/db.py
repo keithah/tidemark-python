@@ -246,6 +246,11 @@ _CREATE_RETAINED_AUDIO_INDEX_SQL = (
     "ON retained_audio(source_url, start_ts, duration_seconds)",
 )
 
+_CREATE_SEGMENTS_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_segments_restart_evidence "
+    "ON segments(source_url, sequence, sha256)",
+)
+
 _INSERT_SEGMENT_SQL = """
 INSERT INTO segments (
     source_url,
@@ -354,6 +359,8 @@ def migrate(conn: sqlite3.Connection) -> None:
         for statement in _CREATE_TRANSCRIPT_WORDS_INDEX_SQL:
             conn.execute(statement)
         for statement in _CREATE_RETAINED_AUDIO_INDEX_SQL:
+            conn.execute(statement)
+        for statement in _CREATE_SEGMENTS_INDEX_SQL:
             conn.execute(statement)
         current_version = conn.execute("PRAGMA user_version").fetchone()[0]
         if current_version < SCHEMA_VERSION:
@@ -519,7 +526,47 @@ def get_segment(conn: sqlite3.Connection, row_id: int) -> SegmentStoreRecord | N
     ).fetchone()
     if row is None:
         return None
+    return _segment_record_from_row(row)
 
+
+def find_segment_by_restart_evidence(
+    conn: sqlite3.Connection,
+    *,
+    source_url: str,
+    sequence: int,
+    sha256: str,
+    byte_length: int,
+) -> SegmentStoreRecord | None:
+    """Fetch the oldest segment row matching immutable restart evidence.
+
+    The lookup is read-only and intentionally validates only field names so
+    callers can surface errors without leaking source URLs or content hashes.
+    """
+    function_name = "find_segment_by_restart_evidence"
+    normalized_source_url = _require_non_empty_string("source_url", source_url, function_name=function_name)
+    normalized_sequence = _require_int("sequence", sequence, minimum=0, function_name=function_name)
+    normalized_sha256 = _normalize_sha256(sha256, function_name=function_name)
+    normalized_byte_length = _require_int("byte_length", byte_length, minimum=0, function_name=function_name)
+    row = conn.execute(
+        """
+        SELECT id, source_url, sequence, resolved_uri, local_path, start_ts,
+               duration_seconds, byte_length, sha256, metadata_json
+        FROM segments
+        WHERE source_url = ?
+          AND sequence = ?
+          AND sha256 = ?
+          AND byte_length = ?
+        ORDER BY id ASC
+        LIMIT 1
+        """,
+        (normalized_source_url, normalized_sequence, normalized_sha256, normalized_byte_length),
+    ).fetchone()
+    if row is None:
+        return None
+    return _segment_record_from_row(row)
+
+
+def _segment_record_from_row(row: sqlite3.Row | tuple[Any, ...]) -> SegmentStoreRecord:
     metadata_json = row[9]
     metadata = json.loads(metadata_json) if metadata_json is not None else None
     return SegmentStoreRecord(

@@ -4,7 +4,7 @@ import sqlite3
 
 import pytest
 
-from tidemark.store import SCHEMA_VERSION, SegmentStoreRecord, get_segment, insert_segment, migrate
+from tidemark.store import SCHEMA_VERSION, SegmentStoreRecord, find_segment_by_restart_evidence, get_segment, insert_segment, migrate
 
 
 EXPECTED_AD_EVENT_COLUMNS = [
@@ -168,6 +168,143 @@ def test_insert_segment_allows_duplicate_content_without_unique_constraint():
 
     assert second_id != first_id
     assert conn.execute("select count(*) from segments").fetchone()[0] == 2
+
+
+def test_find_segment_by_restart_evidence_returns_matching_segment_record():
+    conn = sqlite3.connect(":memory:")
+    migrate(conn)
+    row_id = insert_segment(
+        conn,
+        source_url="fixture://stream",
+        sequence=7,
+        resolved_uri="fixture://segment-7.ts",
+        local_path=None,
+        start_ts=42.0,
+        duration_seconds=6.0,
+        byte_length=1234,
+        sha256="4" * 64,
+        metadata={"program_date_time": "2026-04-28T00:00:00Z"},
+    )
+
+    stored = find_segment_by_restart_evidence(
+        conn,
+        source_url="fixture://stream",
+        sequence=7,
+        sha256="4" * 64,
+        byte_length=1234,
+    )
+
+    assert stored == SegmentStoreRecord(
+        id=row_id,
+        source_url="fixture://stream",
+        sequence=7,
+        resolved_uri="fixture://segment-7.ts",
+        local_path=None,
+        start_ts=42.0,
+        duration_seconds=6.0,
+        byte_length=1234,
+        sha256="4" * 64,
+        metadata={"program_date_time": "2026-04-28T00:00:00Z"},
+    )
+
+
+def test_find_segment_by_restart_evidence_selects_oldest_matching_duplicate_without_mutating_rows():
+    conn = sqlite3.connect(":memory:")
+    migrate(conn)
+    first_id = insert_segment(
+        conn,
+        source_url="fixture://stream",
+        sequence=2,
+        resolved_uri="fixture://segment-2-first.ts",
+        local_path=None,
+        start_ts=0,
+        duration_seconds=1,
+        byte_length=10,
+        sha256="5" * 64,
+    )
+    second_id = insert_segment(
+        conn,
+        source_url="fixture://stream",
+        sequence=2,
+        resolved_uri="fixture://segment-2-second.ts",
+        local_path=None,
+        start_ts=1,
+        duration_seconds=1,
+        byte_length=10,
+        sha256="5" * 64,
+    )
+
+    stored = find_segment_by_restart_evidence(
+        conn,
+        source_url="fixture://stream",
+        sequence=2,
+        sha256="5" * 64,
+        byte_length=10,
+    )
+
+    assert stored is not None
+    assert stored.id == first_id
+    assert stored.resolved_uri == "fixture://segment-2-first.ts"
+    assert second_id != first_id
+    assert conn.execute("select count(*) from segments").fetchone()[0] == 2
+
+
+@pytest.mark.parametrize(
+    "evidence",
+    [
+        {"source_url": "fixture://other", "sequence": 7, "sha256": "6" * 64, "byte_length": 1234},
+        {"source_url": "fixture://stream", "sequence": 8, "sha256": "6" * 64, "byte_length": 1234},
+        {"source_url": "fixture://stream", "sequence": 7, "sha256": "7" * 64, "byte_length": 1234},
+        {"source_url": "fixture://stream", "sequence": 7, "sha256": "6" * 64, "byte_length": 4321},
+    ],
+)
+def test_find_segment_by_restart_evidence_returns_none_when_evidence_changes(evidence):
+    conn = sqlite3.connect(":memory:")
+    migrate(conn)
+    insert_segment(
+        conn,
+        source_url="fixture://stream",
+        sequence=7,
+        resolved_uri="fixture://segment-7.ts",
+        local_path=None,
+        start_ts=42.0,
+        duration_seconds=6.0,
+        byte_length=1234,
+        sha256="6" * 64,
+    )
+
+    assert find_segment_by_restart_evidence(conn, **evidence) is None
+
+
+@pytest.mark.parametrize(
+    ("kwargs", "message"),
+    [
+        ({"source_url": ""}, "source_url"),
+        ({"sequence": -1}, "sequence"),
+        ({"sequence": 1.2}, "sequence"),
+        ({"sha256": "not-hex"}, "sha256"),
+        ({"sha256": "g" * 64}, "sha256"),
+        ({"byte_length": -1}, "byte_length"),
+        ({"byte_length": 1.2}, "byte_length"),
+    ],
+)
+def test_find_segment_by_restart_evidence_rejects_malformed_inputs_without_leaking_source(kwargs, message):
+    conn = sqlite3.connect(":memory:")
+    migrate(conn)
+    values = {
+        "source_url": "https://example.test/live/stream.m3u8?token=secret",
+        "sequence": 1,
+        "sha256": "8" * 64,
+        "byte_length": 10,
+    }
+    values.update(kwargs)
+
+    with pytest.raises((TypeError, ValueError), match=message) as exc_info:
+        find_segment_by_restart_evidence(conn, **values)
+
+    public_message = str(exc_info.value)
+    assert "secret" not in public_message
+    assert "example.test" not in public_message
 
 
 @pytest.mark.parametrize(
