@@ -4,8 +4,7 @@ import sqlite3
 
 import pytest
 
-from tidemark.store import SCHEMA_VERSION, insert_segment, migrate
-from tidemark.store.db import SegmentStoreRecord, get_segment
+from tidemark.store import SCHEMA_VERSION, SegmentStoreRecord, get_segment, insert_segment, migrate
 
 
 EXPECTED_AD_EVENT_COLUMNS = [

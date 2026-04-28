@@ -8,7 +8,7 @@ import imageio_ffmpeg
 import pytest
 
 from tidemark.audio import AudioChunk, AudioDecodeError, decode_segment_audio
-from tidemark.ingest.segments import SegmentRecord
+from tidemark.ingest import SegmentRecord
 
 
 def _segment_for(data: bytes, *, source_url: str = "https://example.test/live/playlist.m3u8?token=secret", sequence: int = 7) -> SegmentRecord:
