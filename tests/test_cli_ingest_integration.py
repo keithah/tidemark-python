@@ -159,6 +159,11 @@ def assert_public_output_redacted(*outputs: str, forbidden: tuple[str, ...]) -> 
     assert "Traceback" not in combined
 
 
+def table_counts(db_path: Path, table_names: tuple[str, ...]) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        return {table_name: count_rows(conn, table_name) for table_name in table_names}
+
+
 def assert_installed_fingerprint_ingest_succeeds(
     *,
     tmp_path: Path,
@@ -192,6 +197,87 @@ def assert_installed_fingerprint_ingest_succeeds(
     assert "api_key" not in ingest.stdout.lower()
     assert "secret" not in ingest.stdout.lower()
     return ingest
+
+
+def test_installed_restart_ingest_skips_existing_segments_and_preserves_timeline_tables(tmp_path: Path) -> None:
+    media_path = make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = write_manifest(tmp_path / "playlist.m3u8", media_path.name)
+    transcript = write_transcript(tmp_path / "transcript.json")
+    db_path = tmp_path / "tidemark.db"
+    runtime_dir = tmp_path / "runtime"
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text(f'[paths]\nruntime_dir = "{runtime_dir}"\n', encoding="utf-8")
+    timeline_tables = ("segments", "transcript_words", "ad_events", "retained_audio", "songs")
+
+    seed_fingerprint_cache_for_manifest(manifest, db_path)
+
+    first = run_tidemark(
+        "ingest",
+        manifest.name,
+        "--db",
+        db_path.name,
+        "--fixture-transcript",
+        transcript.name,
+        "--fingerprint",
+        "--config",
+        config_path.name,
+        cwd=tmp_path,
+        env=cli_env_without_acoustid_key(),
+    )
+
+    assert first.returncode == 0, f"stdout={first.stdout}\nstderr={first.stderr}"
+    assert first.stderr == ""
+    assert first.stdout == (
+        "Ingest complete: segments=1 processed=1 skipped=0 failed=0 "
+        "words=3 markers=1 retained=1 songs=1 issues=0\n"
+    )
+    counts_after_first = table_counts(db_path, timeline_tables)
+    assert counts_after_first == {
+        "segments": 1,
+        "transcript_words": 3,
+        "ad_events": 1,
+        "retained_audio": 1,
+        "songs": 1,
+    }
+
+    second = run_tidemark(
+        "ingest",
+        manifest.name,
+        "--db",
+        db_path.name,
+        "--fixture-transcript",
+        transcript.name,
+        "--fingerprint",
+        "--config",
+        config_path.name,
+        cwd=tmp_path,
+        env=cli_env_without_acoustid_key(),
+    )
+
+    assert second.returncode == 0, f"stdout={second.stdout}\nstderr={second.stderr}"
+    assert second.stderr == ""
+    assert second.stdout == (
+        "Ingest complete: segments=1 processed=0 skipped=1 failed=0 "
+        "words=0 markers=0 retained=0 songs=0 issues=0\n"
+    )
+    counts_after_second = table_counts(db_path, timeline_tables)
+    assert counts_after_second == counts_after_first, {
+        table_name: (counts_after_first[table_name], counts_after_second[table_name])
+        for table_name in timeline_tables
+        if counts_after_first[table_name] != counts_after_second[table_name]
+    }
+
+    status = run_tidemark("status", "--runtime-dir", runtime_dir, cwd=tmp_path)
+
+    assert status.returncode == 0, f"stdout={status.stdout}\nstderr={status.stderr}"
+    assert status.stderr == ""
+    assert "command=ingest" in status.stdout
+    assert (
+        "counters=failed=0,issues=0,markers=0,processed=0,retained=0,segments=1,skipped=1,songs=0,words=0"
+        in status.stdout
+    )
+    assert str(tmp_path) not in status.stdout
+    assert "Traceback" not in status.stdout
 
 
 def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_api_key(tmp_path: Path) -> None:

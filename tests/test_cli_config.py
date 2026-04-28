@@ -286,7 +286,7 @@ lookup_timeout_seconds = 9
     )
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=0 markers=0 retained=0 songs=0 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=0 markers=0 retained=0 songs=0 issues=0\n"
     assert "env-secret" not in result.stdout + result.stderr
     assert len(calls) == 1
     call = calls[0]
