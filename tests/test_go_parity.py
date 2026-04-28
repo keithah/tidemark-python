@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 import pytest
 
@@ -23,6 +25,8 @@ RAW_SPLICE_NULL_BASE64 = "/DARAAAAAAAAAP/wAAAAAHpPv/8="
 HLS_PLAYLIST_ROUTE = "/hls/playlist.m3u8"
 HLS_SEGMENT_ROUTE = "/hls/segment0.ts"
 ICY_ROUTE = "/icy"
+REAL_PARITY_MARKER_LIMIT = 3
+REAL_PARITY_TIMEOUT_SECONDS = "10"
 
 
 @pytest.fixture(scope="session")
@@ -261,6 +265,59 @@ def test_icy_http_fixture_matches_go_after_normalization(
     assert python_markers[0]["Classification"] == "AD_START"
 
 
+@pytest.mark.real_parity
+def test_opt_in_real_stream_matches_go_common_marker_fields(
+    python_cli: Path,
+    go_binary: Path,
+) -> None:
+    real_url = os.getenv("TIDEMARK_PARITY_REAL_URL")
+    if not real_url:
+        pytest.skip("TIDEMARK_PARITY_REAL_URL is not set; skipping private real-stream parity proof")
+
+    sanitized_url = _redact_url_query(real_url)
+    split = urlsplit(real_url)
+    if split.scheme not in {"http", "https", "udp"} or not split.netloc:
+        pytest.fail(f"TIDEMARK_PARITY_REAL_URL is invalid or unsupported: {sanitized_url}")
+
+    real_type = os.getenv("TIDEMARK_PARITY_REAL_TYPE", "auto")
+    python_result = run_command(
+        f"python real stream {sanitized_url}",
+        [
+            python_cli,
+            "monitor",
+            real_url,
+            "--stream-type",
+            real_type,
+            "--json",
+            "--timeout",
+            REAL_PARITY_TIMEOUT_SECONDS,
+        ],
+        timeout=15,
+    )
+    go_result = run_command(
+        f"go real stream {sanitized_url}",
+        [go_binary, "--json", "--timeout", REAL_PARITY_TIMEOUT_SECONDS, real_url],
+        timeout=15,
+    )
+
+    assert_cli_health(python_result)
+    assert_cli_health(go_result)
+    python_markers = parse_ndjson(python_result.stdout, label=f"python real stream {sanitized_url}")
+    go_markers = parse_ndjson(go_result.stdout, label=f"go real stream {sanitized_url}")
+
+    assert python_markers, "python real stream emitted no markers during bounded parity window"
+    assert go_markers, "go real stream emitted no markers during bounded parity window"
+    assert _common_marker_fields(python_markers, go_markers) == _common_marker_fields(go_markers, python_markers)
+
+
+@pytest.mark.udp_parity
+def test_opt_in_udp_parity_requires_multicast_capable_environment() -> None:
+    pytest.skip(
+        "Go UDP parity requires multicast socket behavior; default local/CI execution cannot prove it safely, "
+        "and unicast-only Python UDP behavior would be a false Go parity proof"
+    )
+
+
 def _marker_projection(markers: list[dict[str, Any]]) -> set[tuple[Any, Any, Any]]:
     return {
         (
@@ -274,6 +331,25 @@ def _marker_projection(markers: list[dict[str, Any]]) -> set[tuple[Any, Any, Any
 
 def _drop_keys(markers: list[dict[str, Any]], keys: set[str]) -> list[dict[str, Any]]:
     return [{key: value for key, value in marker.items() if key not in keys} for marker in markers]
+
+
+def _common_marker_fields(left: list[dict[str, Any]], right: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    comparable: list[dict[str, Any]] = []
+    for left_marker, right_marker in zip(
+        normalize_markers(left[:REAL_PARITY_MARKER_LIMIT]),
+        normalize_markers(right[:REAL_PARITY_MARKER_LIMIT]),
+        strict=False,
+    ):
+        common_keys = left_marker.keys() & right_marker.keys()
+        comparable.append({key: left_marker[key] for key in common_keys})
+    return comparable
+
+
+def _redact_url_query(url: str) -> str:
+    split = urlsplit(url)
+    if split.scheme and split.netloc:
+        return urlunsplit((split.scheme, split.netloc, split.path, "", split.fragment))
+    return url
 
 
 def assert_cli_health(result) -> None:

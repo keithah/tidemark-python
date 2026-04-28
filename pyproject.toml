@@ -25,3 +25,7 @@ where = ["src"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+markers = [
+    "real_parity: opt-in side-by-side parity against a private/live stream URL from TIDEMARK_PARITY_REAL_URL",
+    "udp_parity: opt-in side-by-side UDP parity proof requiring multicast-capable local networking",
+]

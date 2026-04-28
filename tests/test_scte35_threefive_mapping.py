@@ -25,6 +25,7 @@ EXPECTED_MARKER_KEYS = [
     "Fields",
     "Timestamp",
 ]
+MPEGTS_SYNC_BYTES = b"\x47" + (b"\x00" * 187) + b"\x47" + (b"\x00" * 187)
 
 
 def test_threefive_imports_current_local_package():
@@ -174,7 +175,7 @@ def test_decode_scte35_markers_from_mpegts_returns_empty_list_for_empty_segment_
 def test_decode_scte35_markers_from_mpegts_maps_stream_cues(monkeypatch):
     class FakeStream:
         def __init__(self, stream_data):
-            assert stream_data.read() == b"mpegts bytes"
+            assert stream_data.read() == MPEGTS_SYNC_BYTES
 
         def decode(self, callback):
             cue = threefive.Cue(SPLICE_NULL)
@@ -185,7 +186,7 @@ def test_decode_scte35_markers_from_mpegts_maps_stream_cues(monkeypatch):
     monkeypatch.setattr(threefive, "Stream", FakeStream)
 
     markers = decode_scte35_markers_from_mpegts(
-        b"mpegts bytes",
+        MPEGTS_SYNC_BYTES,
         source="hls_segment",
         tag=None,
         segment=42,
@@ -226,7 +227,7 @@ def test_decode_scte35_markers_from_mpegts_wraps_stream_failures_without_leaking
     monkeypatch.setattr(threefive, "Stream", FailingStream)
 
     with pytest.raises(ValueError) as exc_info:
-        decode_scte35_markers_from_mpegts(b"private raw bytes")
+        decode_scte35_markers_from_mpegts(MPEGTS_SYNC_BYTES)
 
     message = str(exc_info.value)
     assert "Unable to decode SCTE-35 markers from MPEGTS segment bytes" in message
