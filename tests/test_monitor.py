@@ -103,6 +103,16 @@ def test_json_out_and_db_raw_json_match_emitted_stdout(tmp_path: Path) -> None:
     assert rows == [("fixture://stream?token=secret", line) for line in stdout_lines]
 
 
+def test_marker_type_filter_matches_marker_type_not_classification() -> None:
+    scte_marker = marker("SCTE35", tag=None, classification=UNKNOWN)
+    id3_marker = marker("ID3", tag=None, classification=UNKNOWN)
+
+    result, stdout, _stderr = run_with([scte_marker, id3_marker], MonitorOptions(marker_filter="id3"))
+
+    assert result == MonitorResult(reason="eof", markers_seen=2, markers_emitted=1, markers_filtered=1)
+    assert ndjson_lines(stdout) == [id3_marker.to_dict()]
+
+
 def test_invalid_filter_fails_fast_with_redacted_error() -> None:
     result, stdout, stderr = run_with([marker()], MonitorOptions(source_url="http://example.test/live?token=secret", marker_filter="bogus"))
 

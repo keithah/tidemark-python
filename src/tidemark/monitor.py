@@ -18,9 +18,10 @@ from tidemark.markers import AD_END, AD_START, UNKNOWN, AdMarker, Classifier
 import tidemark.store.db as db
 
 MonitorReason = Literal["eof", "timeout", "interrupted", "error"]
-MarkerFilter = Literal["all", "ad", "AD_START", "AD_END", "UNKNOWN"]
+MarkerFilter = Literal["all", "ad", "AD_START", "AD_END", "UNKNOWN", "scte35", "id3", "icy"]
 
-_VALID_FILTERS = {"all", "ad", AD_START, AD_END, UNKNOWN}
+_MARKER_TYPE_FILTERS = {"scte35", "id3", "icy"}
+_VALID_FILTERS = {"all", "ad", AD_START, AD_END, UNKNOWN, *_MARKER_TYPE_FILTERS}
 
 
 @dataclass(frozen=True)
@@ -206,6 +207,8 @@ def _matches_filter(marker: AdMarker, marker_filter: str) -> bool:
         return True
     if marker_filter == "ad":
         return marker.classification in {AD_START, AD_END}
+    if marker_filter in _MARKER_TYPE_FILTERS:
+        return marker.type.lower() == marker_filter
     return marker.classification == marker_filter
 
 

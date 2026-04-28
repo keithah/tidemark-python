@@ -25,6 +25,7 @@ src/tidemark/markers/scte35.py
 src/tidemark/store/__init__.py
 src/tidemark/store/db.py
 tests/test_classifier.py
+tests/test_cli_integration.py
 tests/test_cli_monitor.py
 tests/test_hls_ingest.py
 tests/test_icy_ingest.py
