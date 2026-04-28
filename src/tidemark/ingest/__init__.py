@@ -16,6 +16,13 @@ from tidemark.ingest.icy import (
     sanitize_icy_metadata,
 )
 from tidemark.ingest.mpegts import iter_mpegts_scte35_markers
+from tidemark.ingest.segments import (
+    SegmentIngestError,
+    SegmentRecord,
+    resolve_local_hls_segments,
+    resolve_local_media_file,
+    resolve_segments,
+)
 from tidemark.ingest.udp import (
     UDPAddressError,
     UDPDatagramReader,
@@ -28,6 +35,8 @@ from tidemark.ingest.udp import (
 __all__ = [
     "DEFAULT_META_INT",
     "HlsScte35Tag",
+    "SegmentIngestError",
+    "SegmentRecord",
     "UDPAddressError",
     "UDPDatagramReader",
     "UDP_DATAGRAM_SIZE",
@@ -43,5 +52,8 @@ __all__ = [
     "parse_hls_scte35_tag",
     "parse_icy_metadata",
     "parse_udp_url",
+    "resolve_local_hls_segments",
+    "resolve_local_media_file",
+    "resolve_segments",
     "sanitize_icy_metadata",
 ]
