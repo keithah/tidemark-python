@@ -2,8 +2,10 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
 import subprocess
+import wave
 from pathlib import Path
 
 import imageio_ffmpeg
@@ -95,11 +97,7 @@ def cli_env_without_acoustid_key() -> dict[str, str]:
     return env
 
 
-def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_api_key(tmp_path: Path) -> None:
-    media_path = make_tiny_wav(tmp_path / "private-segment37.wav")
-    manifest = write_manifest(tmp_path / "private-playlist.m3u8", media_path.name)
-    db_path = tmp_path / "tidemark.db"
-
+def seed_fingerprint_cache_for_manifest(manifest: Path, db_path: Path) -> None:
     [segment] = resolve_segments(manifest)
     chunk = decode_segment_audio(segment)
     try:
@@ -121,6 +119,14 @@ def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_ap
             lookup_source="seeded-installed-cli-cache",
         )
 
+
+def assert_installed_fingerprint_ingest_succeeds(
+    *,
+    tmp_path: Path,
+    manifest: Path,
+    media_path: Path,
+    db_path: Path,
+) -> subprocess.CompletedProcess[str]:
     ingest = run_tidemark(
         "ingest",
         manifest.name,
@@ -146,6 +152,16 @@ def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_ap
     assert "ACOUSTID" not in ingest.stdout
     assert "api_key" not in ingest.stdout.lower()
     assert "secret" not in ingest.stdout.lower()
+    return ingest
+
+
+def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_api_key(tmp_path: Path) -> None:
+    media_path = make_tiny_wav(tmp_path / "private-segment37.wav")
+    manifest = write_manifest(tmp_path / "private-playlist.m3u8", media_path.name)
+    db_path = tmp_path / "tidemark.db"
+
+    seed_fingerprint_cache_for_manifest(manifest, db_path)
+    assert_installed_fingerprint_ingest_succeeds(tmp_path=tmp_path, manifest=manifest, media_path=media_path, db_path=db_path)
 
     with sqlite3.connect(db_path) as conn:
         user_version = conn.execute("PRAGMA user_version").fetchone()[0]
@@ -175,6 +191,75 @@ def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_ap
     assert retained_file.suffix == ".wav"
     assert media_path.stem not in retained_file.name
     assert "private" not in retained_file.name
+
+
+def test_installed_fingerprint_ingest_retained_audio_can_be_exported_by_clip(tmp_path: Path) -> None:
+    media_path = make_tiny_wav(tmp_path / "private-segment37.wav")
+    manifest = write_manifest(tmp_path / "private-playlist.m3u8", media_path.name)
+    db_path = tmp_path / "tidemark.db"
+    clip_path = tmp_path / "private-exported-clip.wav"
+    missing_clip_path = tmp_path / "private-missing-clip.wav"
+
+    seed_fingerprint_cache_for_manifest(manifest, db_path)
+    assert_installed_fingerprint_ingest_succeeds(tmp_path=tmp_path, manifest=manifest, media_path=media_path, db_path=db_path)
+
+    clip = run_tidemark(
+        "clip",
+        "--at",
+        "0.10",
+        "--context",
+        "0.05",
+        "--db",
+        db_path.name,
+        "--out",
+        clip_path.name,
+        cwd=tmp_path,
+    )
+
+    assert clip.returncode == 0, clip.stderr
+    assert clip.stderr == ""
+    assert re.fullmatch(r"Clip exported: start=0\.050 duration=0\.100 bytes=\d+ sha256=[0-9a-f]{64}\n", clip.stdout)
+    assert str(tmp_path) not in clip.stdout
+    assert media_path.name not in clip.stdout
+    assert manifest.name not in clip.stdout
+    assert db_path.name not in clip.stdout
+    assert clip_path.name not in clip.stdout
+    assert "private" not in clip.stdout
+    assert clip_path.read_bytes().startswith(b"RIFF")
+
+    with wave.open(str(clip_path), "rb") as exported:
+        assert exported.getnchannels() == 1
+        assert exported.getframerate() == 16000
+        assert exported.getsampwidth() == 2
+        assert 0 < exported.getnframes() <= 1600
+
+    missing = run_tidemark(
+        "clip",
+        "--at",
+        "999",
+        "--context",
+        "0.05",
+        "--db",
+        db_path.name,
+        "--out",
+        missing_clip_path.name,
+        cwd=tmp_path,
+    )
+
+    assert missing.returncode == 1
+    assert missing.stdout == ""
+    assert not missing_clip_path.exists()
+    assert "[tidemark] error: no retained audio covers timestamp" in missing.stderr
+    assert "Traceback" not in missing.stderr
+    assert str(tmp_path) not in missing.stderr
+    assert media_path.name not in missing.stderr
+    assert manifest.name not in missing.stderr
+    assert db_path.name not in missing.stderr
+    assert clip_path.name not in missing.stderr
+    assert missing_clip_path.name not in missing.stderr
+    assert "private" not in missing.stderr
+    assert "ACOUSTID" not in missing.stderr
+    assert "api_key" not in missing.stderr.lower()
 
 
 def test_installed_plain_ingest_without_fixture_remains_nonzero_and_redacted(tmp_path: Path) -> None:
