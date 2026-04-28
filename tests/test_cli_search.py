@@ -114,7 +114,7 @@ def test_search_human_output_has_stable_one_line_per_result(monkeypatch: pytest.
     assert result.exit_code == 0, result.output
     assert result.stdout == (
         "https://example.test/live.m3u8?token=secret | 12.250s | segment 7 seq 42 | before hello world after\n"
-        "file:///tmp/sample.ts | 98.000s | segment 8 seq 43 | another hit context\n"
+        "[local file] | 98.000s | segment 8 seq 43 | another hit context\n"
     )
 
 

@@ -90,7 +90,7 @@ def test_source_label_redaction_removes_queries_secret_values_and_private_dirs(t
     assert url_label == "example.com/private/live.m3u8"
     assert "token" not in url_label
     assert "secret" not in url_label
-    assert path_label == "source.wav"
+    assert path_label == "[local file]"
     assert str(tmp_path) not in path_label
     assert "abc123" not in error_label
     assert "token=secret" not in error_label

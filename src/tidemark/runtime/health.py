@@ -14,6 +14,7 @@ import re
 import secrets
 from dataclasses import dataclass, field, replace
 from datetime import datetime, timezone
+from os import PathLike
 from pathlib import Path
 from typing import Any, Callable, Literal
 from urllib.parse import urlsplit
@@ -99,6 +100,9 @@ def redact_source_label(value: object) -> str:
     """Return a status-safe source/error label without secrets or private dirs."""
     if value is None:
         return ""
+    if isinstance(value, PathLike):
+        return "[local file]"
+
     text = str(value)
     if not text:
         return ""
@@ -109,10 +113,12 @@ def redact_source_label(value: object) -> str:
         host = parsed.hostname or "[redacted-url]"
         path = parsed.path or ""
         return f"{host}{path}" or "[redacted-url]"
+    if parsed.scheme == "file":
+        return "[local file]"
 
     path = Path(stripped).expanduser()
     if _looks_like_path(stripped, path):
-        return redact_path(path)
+        return "[local file]"
 
     redacted = _URL_RE.sub(lambda match: redact_source_label(match.group(0)), stripped)
     redacted = _SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[redacted]", redacted)

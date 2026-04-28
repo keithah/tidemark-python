@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 
@@ -56,7 +57,7 @@ def run_search_command(
         _fatal("search failed")
 
     if json_output:
-        rows = [asdict(result) for result in results]
+        rows = [_public_search_dict(result) for result in results]
         typer.echo(json.dumps(rows, separators=(",", ":")))
         return
 
@@ -66,7 +67,7 @@ def run_search_command(
 
     for result in results:
         typer.echo(
-            f"{result.source_url} | {result.hit_start_ts:.3f}s | "
+            f"{_public_source_label(result.source_url)} | {result.hit_start_ts:.3f}s | "
             f"segment {result.segment_id} seq {result.segment_sequence} | {result.context_text}"
         )
 
@@ -94,6 +95,20 @@ def search(
         context_seconds=resolved.context_seconds,
         json_output=json_output,
     )
+
+
+def _public_search_dict(result: object) -> dict[str, object]:
+    values = asdict(result)
+    if "source_url" in values:
+        values["source_url"] = _public_source_label(str(values["source_url"]))
+    return values
+
+
+def _public_source_label(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    if parsed.scheme == "file":
+        return "[local file]"
+    return source_url
 
 
 def _fatal(message: str) -> None:

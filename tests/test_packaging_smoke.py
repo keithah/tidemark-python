@@ -1,12 +1,19 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import os
+import re
 import shutil
+import sqlite3
 import subprocess
+import wave
 from pathlib import Path
 
+import imageio_ffmpeg
 import pytest
+
+from tidemark.store import insert_retained_audio, insert_segment, migrate
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -37,6 +44,7 @@ ENV_REMOVE_EXACT = {
     "TIDEMARK_RUNTIME_DIR",
 }
 ENV_REMOVE_TOKEN = ("ACOUSTID", "PYTHON", "VENV")
+TIMELINE_TABLES = ("segments", "transcript_words", "ad_events", "retained_audio", "songs")
 
 
 @pytest.fixture(scope="session")
@@ -115,12 +123,155 @@ def copy_monitor_fixture(tmp_path: Path) -> Path:
     return destination
 
 
+def make_tiny_wav(path: Path) -> Path:
+    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
+    subprocess.run(
+        [
+            ffmpeg,
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.20:sample_rate=8000",
+            "-ac",
+            "1",
+            "-y",
+            str(path),
+        ],
+        check=True,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.PIPE,
+    )
+    return path
+
+
+def write_manifest(path: Path, segment_name: str) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "#EXTM3U",
+                "#EXT-X-MEDIA-SEQUENCE:37",
+                "#EXT-X-CUE-OUT:DURATION=15.0",
+                "#EXTINF:0.20,",
+                segment_name,
+                "#EXT-X-CUE-IN",
+                "#EXT-X-ENDLIST",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def write_transcript(path: Path) -> Path:
+    path.write_text(
+        json.dumps(
+            [
+                {"text": "hello", "start_offset": 0.03, "end_offset": 0.06, "confidence": 0.9},
+                {"text": "tidemark", "start_offset": 0.07, "end_offset": 0.11, "confidence": 0.8},
+                {"text": "search", "start_offset": 0.12, "end_offset": 0.16},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
+def count_rows(conn: sqlite3.Connection, table: str) -> int:
+    return int(conn.execute(f"SELECT COUNT(*) FROM {table}").fetchone()[0])
+
+
+def table_counts(db_path: Path, table_names: tuple[str, ...]) -> dict[str, int]:
+    with sqlite3.connect(db_path) as conn:
+        return {table_name: count_rows(conn, table_name) for table_name in table_names}
+
+
 def assert_no_traceback_or_private_path(result: subprocess.CompletedProcess[str], *private_paths: Path) -> None:
     combined = result.stdout + result.stderr
     assert "Traceback" not in combined, _format_result(result)
     for private_path in private_paths:
         private_text = str(private_path)
         assert private_text not in combined, _format_result(result)
+
+
+def assert_public_output_redacted(*outputs: str, forbidden: tuple[str, ...]) -> None:
+    combined = "\n".join(outputs)
+    for value in forbidden:
+        assert value not in combined, combined
+    assert "Traceback" not in combined, combined
+    assert "ACOUSTID" not in combined, combined
+    assert "api_key" not in combined.lower(), combined
+    assert "secret" not in combined.lower(), combined
+    assert "RawBase64" not in combined, combined
+
+
+def _pcm_s16le(frames: int, *, start: int = 0, channels: int = 1) -> bytes:
+    samples: list[bytes] = []
+    for frame in range(frames):
+        for channel in range(channels):
+            value = ((start + frame + channel) % 128) - 64
+            samples.append(value.to_bytes(2, "little", signed=True))
+    return b"".join(samples)
+
+
+def _write_wav(path: Path, pcm: bytes, *, sample_rate: int = 16000, channels: int = 1, sample_width: int = 2) -> None:
+    with wave.open(str(path), "wb") as wav:
+        wav.setnchannels(channels)
+        wav.setsampwidth(sample_width)
+        wav.setframerate(sample_rate)
+        wav.writeframes(pcm)
+
+
+def _wav_metadata(path: Path) -> tuple[int, str]:
+    payload = path.read_bytes()
+    return len(payload), hashlib.sha256(payload).hexdigest()
+
+
+def create_retained_audio_clip_fixture(tmp_path: Path) -> tuple[Path, Path]:
+    db_path = tmp_path / "private-state" / "tidemark.sqlite3"
+    db_path.parent.mkdir(parents=True, exist_ok=True)
+    retained_dir = db_path.parent / "audio"
+    retained_dir.mkdir()
+    retained_path = retained_dir / "secret-fixture-name.wav"
+    pcm = _pcm_s16le(8000)
+    _write_wav(retained_path, pcm)
+    byte_length, sha256 = _wav_metadata(retained_path)
+
+    conn = sqlite3.connect(db_path)
+    try:
+        migrate(conn)
+        segment_id = insert_segment(
+            conn,
+            source_url="https://example.test/private/source.m3u8?token=secret",
+            sequence=37,
+            resolved_uri="file:///Users/alice/private/segment.ts?token=secret",
+            local_path="/Users/alice/private/segment.ts",
+            start_ts=10.0,
+            duration_seconds=0.5,
+            byte_length=byte_length,
+            sha256="0" * 64,
+        )
+        insert_retained_audio(
+            conn,
+            segment_id=segment_id,
+            source_url="https://example.test/private/source.m3u8?token=secret",
+            segment_sequence=37,
+            path=retained_path.relative_to(db_path.parent).as_posix(),
+            format="wav",
+            sample_rate=16000,
+            channels=1,
+            sample_format="s16le",
+            start_ts=10.0,
+            duration_seconds=0.5,
+            byte_length=byte_length,
+            sha256=sha256,
+        )
+        conn.commit()
+    finally:
+        conn.close()
+    return db_path, retained_path
 
 
 def _format_result(result: subprocess.CompletedProcess[str]) -> str:
@@ -230,3 +381,184 @@ def test_packaged_monitor_and_root_alias_emit_matching_marker_shape(
     assert [comparable_marker(marker) for marker in alias_markers] == [
         comparable_marker(marker) for marker in canonical_markers
     ]
+
+
+def test_packaged_restart_ingest_skips_existing_segments_and_preserves_timeline_tables(
+    packaged_cli: Path,
+    clean_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    media_path = make_tiny_wav(tmp_path / "private-segment37.wav")
+    manifest = write_manifest(tmp_path / "private-playlist.m3u8", media_path.name)
+    transcript = write_transcript(tmp_path / "private-transcript.json")
+    db_path = tmp_path / "private-tidemark.db"
+    runtime_dir = tmp_path / "runtime"
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text('[paths]\nruntime_dir = "runtime"\n', encoding="utf-8")
+    forbidden_public_values = (
+        str(tmp_path),
+        media_path.name,
+        manifest.name,
+        transcript.name,
+        db_path.name,
+        "private",
+    )
+
+    first = run_packaged(
+        packaged_cli,
+        clean_env,
+        "ingest",
+        manifest.name,
+        "--db",
+        db_path.name,
+        "--fixture-transcript",
+        transcript.name,
+        "--config",
+        config_path.name,
+        cwd=tmp_path,
+        timeout=20.0,
+    )
+
+    assert first.returncode == 0, _format_result(first)
+    assert first.stderr == "", _format_result(first)
+    assert first.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=3 markers=1 issues=0\n"
+    assert_public_output_redacted(first.stdout, first.stderr, forbidden=forbidden_public_values)
+    counts_after_first = table_counts(db_path, TIMELINE_TABLES)
+    assert counts_after_first == {
+        "segments": 1,
+        "transcript_words": 3,
+        "ad_events": 1,
+        "retained_audio": 0,
+        "songs": 0,
+    }
+
+    second = run_packaged(
+        packaged_cli,
+        clean_env,
+        "ingest",
+        manifest.name,
+        "--db",
+        db_path.name,
+        "--fixture-transcript",
+        transcript.name,
+        "--config",
+        config_path.name,
+        cwd=tmp_path,
+        timeout=20.0,
+    )
+
+    assert second.returncode == 0, _format_result(second)
+    assert second.stderr == "", _format_result(second)
+    assert second.stdout == "Ingest complete: segments=1 processed=0 skipped=1 failed=0 words=0 markers=0 issues=0\n"
+    assert_public_output_redacted(second.stdout, second.stderr, forbidden=forbidden_public_values)
+    counts_after_second = table_counts(db_path, TIMELINE_TABLES)
+    assert counts_after_second == counts_after_first, {
+        table_name: (counts_after_first[table_name], counts_after_second[table_name])
+        for table_name in TIMELINE_TABLES
+        if counts_after_first[table_name] != counts_after_second[table_name]
+    }
+
+    status = run_packaged(
+        packaged_cli,
+        clean_env,
+        "status",
+        "--runtime-dir",
+        "runtime",
+        cwd=tmp_path,
+    )
+
+    assert status.returncode == 0, _format_result(status)
+    assert status.stderr == "", _format_result(status)
+    assert "command=ingest" in status.stdout, _format_result(status)
+    assert (
+        "counters=failed=0,issues=0,markers=0,processed=0,retained=0,segments=1,skipped=1,songs=0,words=0"
+        in status.stdout
+    ), _format_result(status)
+    assert_public_output_redacted(status.stdout, status.stderr, forbidden=forbidden_public_values)
+
+    search = run_packaged(
+        packaged_cli,
+        clean_env,
+        "search",
+        "tidemark search",
+        "--db",
+        db_path.name,
+        "--context",
+        "1",
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert search.returncode == 0, _format_result(search)
+    assert search.stderr == "", _format_result(search)
+    search_rows = json.loads(search.stdout)
+    assert isinstance(search_rows, list), _format_result(search)
+    assert len(search_rows) == 1, _format_result(search)
+    [search_row] = search_rows
+    assert search_row["matched_text"] == "tidemark search"
+    assert search_row["context_text"] == "hello tidemark search"
+    assert search_row["segment_sequence"] == 37
+    assert_public_output_redacted(search.stdout, search.stderr, forbidden=forbidden_public_values)
+
+    ads = run_packaged(
+        packaged_cli,
+        clean_env,
+        "report",
+        "ads",
+        "--db",
+        db_path.name,
+        "--json",
+        cwd=tmp_path,
+    )
+
+    assert ads.returncode == 0, _format_result(ads)
+    assert ads.stderr == "", _format_result(ads)
+    ad_rows = json.loads(ads.stdout)
+    assert isinstance(ad_rows, list), _format_result(ads)
+    assert ad_rows, _format_result(ads)
+    assert any(row["classification"] == "AD_START" and row["count"] >= 1 for row in ad_rows), _format_result(ads)
+    assert_public_output_redacted(ads.stdout, ads.stderr, forbidden=forbidden_public_values)
+
+
+def test_packaged_clip_exports_from_retained_audio_database(
+    packaged_cli: Path,
+    clean_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    db_path, retained_path = create_retained_audio_clip_fixture(tmp_path)
+    db_arg = db_path.relative_to(tmp_path)
+    clip_path = tmp_path / "private-exported-clip.wav"
+    forbidden_public_values = (
+        str(tmp_path),
+        db_path.name,
+        retained_path.name,
+        clip_path.name,
+        "private",
+    )
+
+    clip = run_packaged(
+        packaged_cli,
+        clean_env,
+        "clip",
+        "--at",
+        "10.25",
+        "--context",
+        "0.05",
+        "--db",
+        db_arg,
+        "--out",
+        clip_path.name,
+        cwd=tmp_path,
+    )
+
+    assert clip.returncode == 0, _format_result(clip)
+    assert clip.stderr == "", _format_result(clip)
+    assert re.fullmatch(r"Clip exported: start=10\.200 duration=0\.100 bytes=\d+ sha256=[0-9a-f]{64}\n", clip.stdout)
+    assert_public_output_redacted(clip.stdout, clip.stderr, forbidden=forbidden_public_values)
+    assert clip_path.read_bytes().startswith(b"RIFF")
+
+    with wave.open(str(clip_path), "rb") as exported:
+        assert exported.getnchannels() == 1
+        assert exported.getframerate() == 16000
+        assert exported.getsampwidth() == 2
+        assert 0 < exported.getnframes() <= 1600
