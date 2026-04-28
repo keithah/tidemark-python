@@ -1,4 +1,6 @@
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+import threading
 
 import pytest
 import threefive
@@ -10,6 +12,21 @@ from tidemark.markers import decode_scte35_marker
 SPLICE_NULL = "/DARAAAAAAAAAP/wAAAAAHpPGuQ="
 PRIVATE_URL = "https://secret.example/live.ts?token=abc"
 PRIVATE_ERROR_TEXT = "private raw bytes token=abc were malformed"
+FIXTURE_PATH = Path("tests/fixtures/scte35_splice_null.ts")
+EXPECTED_MARKER_KEYS = [
+    "Type",
+    "Classification",
+    "Source",
+    "Tag",
+    "PTS",
+    "Segment",
+    "RawBase64",
+    "Command",
+    "Descriptors",
+    "Tags",
+    "Fields",
+    "Timestamp",
+]
 
 
 def marker_from_raw(raw_base64):
@@ -46,6 +63,75 @@ class DecodeFailingStream:
     def decode_next(self):
         raise RuntimeError(PRIVATE_ERROR_TEXT)
         yield  # pragma: no cover
+
+
+def _assert_splice_null_marker(markers):
+    assert markers, "expected the MPEGTS fixture to decode at least one SCTE-35 marker"
+    marker = markers[0]
+    marker_dict = marker.to_dict()
+
+    assert list(marker_dict) == EXPECTED_MARKER_KEYS
+    assert marker_dict["Type"] == "SCTE35"
+    assert marker_dict["Source"] == "mpegts"
+    assert marker_dict["Fields"]["CommandName"] == "Splice Null"
+    assert marker_dict["Classification"] == "UNKNOWN"
+    assert marker_dict["RawBase64"] is not None
+    decoded_marker = marker_from_raw(marker_dict["RawBase64"])
+    assert decoded_marker.fields == {"CommandName": "Splice Null"}
+
+
+def _assert_fixture_decodes_with_threefive():
+    assert FIXTURE_PATH.exists(), f"missing tracked MPEGTS fixture: {FIXTURE_PATH}"
+    cues = list(threefive.Stream(str(FIXTURE_PATH), show_null=True).decode_next())
+    assert cues, "expected real threefive.Stream to decode the tracked MPEGTS fixture"
+    assert cues[0].command.get()["name"] == "Splice Null"
+
+
+def test_iter_mpegts_scte35_markers_reads_tracked_file_fixture():
+    _assert_fixture_decodes_with_threefive()
+
+    markers = list(iter_mpegts_scte35_markers(FIXTURE_PATH, timestamp_fn=lambda: 123.0))
+
+    _assert_splice_null_marker(markers)
+    assert markers[0].to_dict()["Timestamp"] == 123.0
+
+
+def test_iter_mpegts_scte35_markers_reads_http_fixture():
+    _assert_fixture_decodes_with_threefive()
+    fixture_bytes = FIXTURE_PATH.read_bytes()
+
+    class FixtureHandler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            if self.path != "/scte35_splice_null.ts":
+                self.send_error(404)
+                return
+            self.send_response(200)
+            self.send_header("Content-Type", "video/MP2T")
+            self.send_header("Content-Length", str(len(fixture_bytes)))
+            self.end_headers()
+            self.wfile.write(fixture_bytes)
+
+        def log_message(self, format, *args):  # noqa: A002
+            return
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), FixtureHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        host, port = server.server_address
+        markers = list(
+            iter_mpegts_scte35_markers(
+                f"http://{host}:{port}/scte35_splice_null.ts",
+                timestamp_fn=lambda: 123.0,
+            )
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
+
+    _assert_splice_null_marker(markers)
+    assert markers[0].to_dict()["Timestamp"] == 123.0
 
 
 def test_iter_mpegts_scte35_markers_maps_local_path_strings(monkeypatch):
