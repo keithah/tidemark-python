@@ -827,6 +827,35 @@ def get_retained_audio(conn: sqlite3.Connection, row_id: int) -> RetainedAudioSt
     ).fetchone()
     if row is None:
         return None
+    return _retained_audio_record_from_row(row)
+
+
+def find_retained_audio_covering(conn: sqlite3.Connection, at_seconds: int | float) -> RetainedAudioStoreRecord | None:
+    """Return the deterministic retained-audio row covering ``at_seconds``.
+
+    The query intentionally does not expose paths or source URLs in validation
+    errors; callers that surface errors should keep DB and retained paths
+    redacted as well.
+    """
+    normalized_at = _require_number("at_seconds", at_seconds, minimum=0, function_name="find_retained_audio_covering")
+    row = conn.execute(
+        """
+        SELECT id, segment_id, source_url, segment_sequence, path, format,
+               sample_rate, channels, sample_format, start_ts, duration_seconds,
+               byte_length, sha256, created_at
+        FROM retained_audio
+        WHERE start_ts <= ? AND ? <= start_ts + duration_seconds
+        ORDER BY start_ts DESC, duration_seconds ASC, id ASC
+        LIMIT 1
+        """,
+        (normalized_at, normalized_at),
+    ).fetchone()
+    if row is None:
+        return None
+    return _retained_audio_record_from_row(row)
+
+
+def _retained_audio_record_from_row(row: sqlite3.Row | tuple[Any, ...]) -> RetainedAudioStoreRecord:
     return RetainedAudioStoreRecord(
         id=int(row[0]),
         segment_id=int(row[1]),
