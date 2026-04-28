@@ -8,6 +8,7 @@ from typer.core import TyperGroup
 
 from tidemark.cli.cmd_ingest import ingest
 from tidemark.cli.cmd_monitor import monitor
+from tidemark.cli.cmd_report import report
 from tidemark.cli.cmd_search import search
 
 
@@ -44,6 +45,7 @@ def root() -> None:
 
 app.command(name="ingest")(ingest)
 app.command(name="monitor")(monitor)
+app.add_typer(report, name="report")
 app.command(name="search")(search)
 
 __all__ = ["RootAliasGroup", "app", "root"]
