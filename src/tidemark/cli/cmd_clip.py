@@ -8,6 +8,7 @@ from typing import Annotated
 import typer
 
 from tidemark.clip import ClipExportError, export_clip_db
+from tidemark.config import ClipOverrides, ConfigError, load_config, resolve_clip_options
 
 
 AtOption = Annotated[
@@ -19,8 +20,12 @@ ContextOption = Annotated[
     typer.Option("--context", help="Seconds of retained audio context to include before and after --at."),
 ]
 DbOption = Annotated[
-    Path,
+    Path | None,
     typer.Option("--db", help="SQLite database containing schema-v4 retained_audio rows."),
+]
+ConfigOption = Annotated[
+    Path | None,
+    typer.Option("--config", help="TOML config file to load for command defaults."),
 ]
 OutOption = Annotated[
     Path,
@@ -66,13 +71,20 @@ def clip(
     at_seconds: AtOption,
     context_seconds: ContextOption,
     out_path: OutOption,
-    db_path: DbOption = Path("tidemark.db"),
+    db_path: DbOption = None,
+    config_path: ConfigOption = None,
 ) -> None:
     """Export a WAV clip from retained schema-v4 audio around a timestamp."""
+    try:
+        config = load_config(config_path, explicit=config_path is not None)
+        resolved = resolve_clip_options(config, ClipOverrides(db_path=db_path))
+    except ConfigError as exc:
+        _fatal(str(exc))
+
     run_clip_command(
         at_seconds=at_seconds,
         context_seconds=context_seconds,
-        db_path=db_path,
+        db_path=resolved.db_path,
         out_path=out_path,
     )
 

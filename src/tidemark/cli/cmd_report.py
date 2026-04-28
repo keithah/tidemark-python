@@ -10,6 +10,7 @@ from urllib.parse import urlparse
 
 import typer
 
+from tidemark.config import ConfigError, ReportOverrides, load_config, resolve_report_options
 from tidemark.reports import (
     AdSummaryReportRow,
     PlayReportRow,
@@ -22,7 +23,7 @@ from tidemark.reports import (
 
 
 DbOption = Annotated[
-    Path,
+    Path | None,
     typer.Option("--db", help="SQLite database containing schema-v4 timeline rows."),
 ]
 SinceOption = Annotated[
@@ -34,12 +35,16 @@ SourceOption = Annotated[
     typer.Option("--source", help="Only include rows for this source URL."),
 ]
 MinScoreOption = Annotated[
-    float,
+    float | None,
     typer.Option("--min-score", help="Minimum song identification score, inclusive, from 0 to 1."),
 ]
 MinCountOption = Annotated[
-    int,
+    int | None,
     typer.Option("--min-count", help="Minimum repeated play count, inclusive."),
+]
+ConfigOption = Annotated[
+    Path | None,
+    typer.Option("--config", help="TOML config file to load for command defaults."),
 ]
 JsonOption = Annotated[
     bool,
@@ -152,56 +157,84 @@ def run_ads_report_command(
 
 @report.command(name="plays")
 def plays(
-    db_path: DbOption = Path("tidemark.db"),
+    db_path: DbOption = None,
     since_seconds: SinceOption = None,
     source_url: SourceOption = None,
-    min_score: MinScoreOption = 0.8,
+    min_score: MinScoreOption = None,
+    config_path: ConfigOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Print identified song plays from the persisted timeline."""
+    resolved = _resolve_report_cli_options(db_path=db_path, min_score=min_score, min_count=None, config_path=config_path)
     run_plays_report_command(
-        db_path=db_path,
+        db_path=resolved.db_path,
         since_seconds=since_seconds,
         source_url=source_url,
-        min_score=min_score,
+        min_score=resolved.min_score,
         json_output=json_output,
     )
 
 
 @report.command(name="repeats")
 def repeats(
-    db_path: DbOption = Path("tidemark.db"),
+    db_path: DbOption = None,
     since_seconds: SinceOption = None,
     source_url: SourceOption = None,
-    min_count: MinCountOption = 2,
-    min_score: MinScoreOption = 0.8,
+    min_count: MinCountOption = None,
+    min_score: MinScoreOption = None,
+    config_path: ConfigOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Print repeated identified song groups from the persisted timeline."""
-    run_repeats_report_command(
+    resolved = _resolve_report_cli_options(
         db_path=db_path,
+        min_score=min_score,
+        min_count=min_count,
+        config_path=config_path,
+    )
+    run_repeats_report_command(
+        db_path=resolved.db_path,
         since_seconds=since_seconds,
         source_url=source_url,
-        min_count=min_count,
-        min_score=min_score,
+        min_count=resolved.min_count,
+        min_score=resolved.min_score,
         json_output=json_output,
     )
 
 
 @report.command(name="ads")
 def ads(
-    db_path: DbOption = Path("tidemark.db"),
+    db_path: DbOption = None,
     since_seconds: SinceOption = None,
     source_url: SourceOption = None,
+    config_path: ConfigOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Print grouped ad marker summaries from the persisted timeline."""
+    resolved = _resolve_report_cli_options(db_path=db_path, min_score=None, min_count=None, config_path=config_path)
     run_ads_report_command(
-        db_path=db_path,
+        db_path=resolved.db_path,
         since_seconds=since_seconds,
         source_url=source_url,
         json_output=json_output,
     )
+
+
+def _resolve_report_cli_options(
+    *,
+    db_path: Path | None,
+    min_score: float | None,
+    min_count: int | None,
+    config_path: Path | None,
+):
+    try:
+        config = load_config(config_path, explicit=config_path is not None)
+        return resolve_report_options(
+            config,
+            ReportOverrides(db_path=db_path, min_score=min_score, min_count=min_count),
+        )
+    except ConfigError as exc:
+        _fatal(str(exc))
 
 
 def _emit_json_or_human[RowT](

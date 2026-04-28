@@ -9,6 +9,7 @@ from typing import Annotated
 
 import typer
 
+from tidemark.config import ConfigError, SearchOverrides, load_config, resolve_search_options
 from tidemark.search import TranscriptSearchError, search_transcript_db
 
 
@@ -17,12 +18,16 @@ QueryArgument = Annotated[
     typer.Argument(help="Transcript word or phrase to search for."),
 ]
 DbOption = Annotated[
-    Path,
+    Path | None,
     typer.Option("--db", help="SQLite database containing schema-v3 transcript_words rows."),
 ]
 ContextOption = Annotated[
-    float,
+    float | None,
     typer.Option("--context", help="Seconds of surrounding transcript context to include."),
+]
+ConfigOption = Annotated[
+    Path | None,
+    typer.Option("--config", help="TOML config file to load for command defaults."),
 ]
 JsonOption = Annotated[
     bool,
@@ -68,15 +73,25 @@ def run_search_command(
 
 def search(
     query: QueryArgument,
-    db_path: DbOption = Path("tidemark.db"),
-    context_seconds: ContextOption = 5.0,
+    db_path: DbOption = None,
+    context_seconds: ContextOption = None,
+    config_path: ConfigOption = None,
     json_output: JsonOption = False,
 ) -> None:
     """Search stored transcript words and print timestamped context windows."""
+    try:
+        config = load_config(config_path, explicit=config_path is not None)
+        resolved = resolve_search_options(
+            config,
+            SearchOverrides(db_path=db_path, context_seconds=context_seconds),
+        )
+    except ConfigError as exc:
+        _fatal(str(exc))
+
     run_search_command(
         query,
-        db_path=db_path,
-        context_seconds=context_seconds,
+        db_path=resolved.db_path,
+        context_seconds=resolved.context_seconds,
         json_output=json_output,
     )
 

@@ -51,6 +51,99 @@ def patch_ingest(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
     return calls
 
 
+def patch_search(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    def fake_search_transcript_db(path, query: str, *, context_seconds: float = 5.0):
+        calls.append({"path": Path(path), "query": query, "context_seconds": context_seconds})
+        return ()
+
+    monkeypatch.setattr("tidemark.cli.cmd_search.search_transcript_db", fake_search_transcript_db)
+    return calls
+
+
+def patch_report(monkeypatch: pytest.MonkeyPatch, command: str) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    def fake_plays_report_db(path, *, since_seconds=None, source_url=None, min_score: float = 0.8):
+        calls.append(
+            {
+                "command": "plays",
+                "path": Path(path),
+                "since_seconds": since_seconds,
+                "source_url": source_url,
+                "min_score": min_score,
+            }
+        )
+        return ()
+
+    def fake_repeats_report_db(
+        path,
+        *,
+        since_seconds=None,
+        source_url=None,
+        min_count: int = 2,
+        min_score: float = 0.8,
+    ):
+        calls.append(
+            {
+                "command": "repeats",
+                "path": Path(path),
+                "since_seconds": since_seconds,
+                "source_url": source_url,
+                "min_count": min_count,
+                "min_score": min_score,
+            }
+        )
+        return ()
+
+    def fake_ads_report_db(path, *, since_seconds=None, source_url=None):
+        calls.append(
+            {"command": "ads", "path": Path(path), "since_seconds": since_seconds, "source_url": source_url}
+        )
+        return ()
+
+    if command == "plays":
+        monkeypatch.setattr("tidemark.cli.cmd_report.plays_report_db", fake_plays_report_db)
+    elif command == "repeats":
+        monkeypatch.setattr("tidemark.cli.cmd_report.repeats_report_db", fake_repeats_report_db)
+    elif command == "ads":
+        monkeypatch.setattr("tidemark.cli.cmd_report.ads_report_db", fake_ads_report_db)
+    else:
+        raise AssertionError(f"unknown report command: {command}")
+    return calls
+
+
+def patch_clip(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
+    calls: list[dict[str, object]] = []
+
+    def fake_export_clip_db(path, *, at_seconds: float, context_seconds: float, out_path):
+        from tidemark.clip import ClipExportResult
+
+        calls.append(
+            {
+                "path": Path(path),
+                "at_seconds": at_seconds,
+                "context_seconds": context_seconds,
+                "out_path": Path(out_path),
+            }
+        )
+        return ClipExportResult(
+            path=Path(out_path),
+            start_ts=1.0,
+            end_ts=2.0,
+            duration_seconds=1.0,
+            sample_rate=48_000,
+            channels=2,
+            sample_format="s16le",
+            byte_length=100,
+            sha256="a" * 64,
+        )
+
+    monkeypatch.setattr("tidemark.cli.cmd_clip.export_clip_db", fake_export_clip_db)
+    return calls
+
+
 def write_manifest(path: Path) -> Path:
     (path.parent / "segment.ts").write_bytes(b"not decoded")
     path.write_text("#EXTM3U\n#EXTINF:0.1,\nsegment.ts\n#EXT-X-ENDLIST\n", encoding="utf-8")
@@ -242,3 +335,265 @@ def test_ingest_bad_secret_type_fails_redacted_before_delegation(monkeypatch: py
         raw_values=["12345", str(source), str(transcript), str(tmp_path)],
         expected=["fingerprint.api_key", "source=config", "[redacted]"],
     )
+
+
+def test_search_config_env_and_cli_precedence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_search(monkeypatch)
+    config_path = write_config(
+        tmp_path,
+        """
+[paths]
+db = "config-search.db"
+
+[search]
+context_seconds = 9.5
+""",
+    )
+
+    result = invoke(
+        ["search", "needle", "--config", str(config_path), "--db", "cli-search.db", "--context", "1.25"],
+        env={"TIDEMARK_DB": "env-search.db"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"path": Path("cli-search.db"), "query": "needle", "context_seconds": 1.25}]
+
+
+def test_search_env_db_overrides_config_and_config_context_applies(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = patch_search(monkeypatch)
+    config_path = write_config(
+        tmp_path,
+        """
+[paths]
+db = "config-search.db"
+
+[search]
+context_seconds = 7
+""",
+    )
+
+    result = invoke(["search", "needle", "--config", str(config_path)], env={"TIDEMARK_DB": "env-search.db"})
+
+    assert result.exit_code == 0, result.output
+    assert calls == [{"path": Path("env-search.db"), "query": "needle", "context_seconds": 7.0}]
+
+
+def test_search_bad_config_fails_before_delegation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_search(monkeypatch)
+    config_path = write_config(tmp_path, "[search]\ncontext_seconds = \"private-context\"")
+
+    result = invoke(["search", "needle", "--config", str(config_path)])
+
+    assert calls == []
+    assert_redacted_config_error(
+        result,
+        raw_values=["private-context", str(tmp_path), str(config_path)],
+        expected=["search.context_seconds", "source=config", "[redacted-value]"],
+    )
+
+
+def test_report_config_env_and_cli_precedence(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_report(monkeypatch, "repeats")
+    config_path = write_config(
+        tmp_path,
+        """
+[paths]
+db = "config-report.db"
+
+[report]
+min_score = 0.44
+min_count = 4
+""",
+    )
+
+    result = invoke(
+        [
+            "report",
+            "repeats",
+            "--config",
+            str(config_path),
+            "--db",
+            "cli-report.db",
+            "--min-score",
+            "0.91",
+            "--min-count",
+            "8",
+        ],
+        env={"TIDEMARK_DB": "env-report.db"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "command": "repeats",
+            "path": Path("cli-report.db"),
+            "since_seconds": None,
+            "source_url": None,
+            "min_count": 8,
+            "min_score": 0.91,
+        }
+    ]
+
+
+def test_report_env_db_overrides_config_and_config_defaults_apply(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = patch_report(monkeypatch, "plays")
+    config_path = write_config(
+        tmp_path,
+        """
+[paths]
+db = "config-report.db"
+
+[report]
+min_score = 0.55
+min_count = 6
+""",
+    )
+
+    result = invoke(["report", "plays", "--config", str(config_path)], env={"TIDEMARK_DB": "env-report.db"})
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "command": "plays",
+            "path": Path("env-report.db"),
+            "since_seconds": None,
+            "source_url": None,
+            "min_score": 0.55,
+        }
+    ]
+
+
+def test_report_repeats_uses_config_min_count_and_score(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_report(monkeypatch, "repeats")
+    config_path = write_config(tmp_path, "[report]\nmin_score = 0.66\nmin_count = 5")
+
+    result = invoke(["report", "repeats", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "command": "repeats",
+            "path": Path("tidemark.db"),
+            "since_seconds": None,
+            "source_url": None,
+            "min_count": 5,
+            "min_score": 0.66,
+        }
+    ]
+
+
+def test_report_ads_uses_shared_config_db_without_report_thresholds(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = patch_report(monkeypatch, "ads")
+    config_path = write_config(
+        tmp_path,
+        """
+[paths]
+db = "config-report.db"
+
+[report]
+min_score = 0.55
+min_count = 6
+""",
+    )
+
+    result = invoke(["report", "ads", "--config", str(config_path)])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {"command": "ads", "path": Path("config-report.db"), "since_seconds": None, "source_url": None}
+    ]
+
+
+def test_report_bad_config_fails_before_delegation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_report(monkeypatch, "plays")
+    config_path = write_config(tmp_path, "[report]\nmin_score = \"private-score\"")
+
+    result = invoke(["report", "plays", "--config", str(config_path)])
+
+    assert calls == []
+    assert_redacted_config_error(
+        result,
+        raw_values=["private-score", str(tmp_path), str(config_path)],
+        expected=["report.min_score", "source=config", "[redacted-value]"],
+    )
+
+
+def test_clip_config_env_and_cli_db_precedence_keeps_action_inputs_explicit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = patch_clip(monkeypatch)
+    out_path = tmp_path / "clip.wav"
+    config_path = write_config(tmp_path, "[paths]\ndb = \"config-clip.db\"")
+
+    result = invoke(
+        [
+            "clip",
+            "--at",
+            "12.5",
+            "--context",
+            "2",
+            "--out",
+            str(out_path),
+            "--config",
+            str(config_path),
+            "--db",
+            "cli-clip.db",
+        ],
+        env={"TIDEMARK_DB": "env-clip.db"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {"path": Path("cli-clip.db"), "at_seconds": 12.5, "context_seconds": 2.0, "out_path": out_path}
+    ]
+
+
+def test_clip_env_db_overrides_config_db(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_clip(monkeypatch)
+    out_path = tmp_path / "clip.wav"
+    config_path = write_config(tmp_path, "[paths]\ndb = \"config-clip.db\"")
+
+    result = invoke(
+        ["clip", "--at", "12.5", "--context", "2", "--out", str(out_path), "--config", str(config_path)],
+        env={"TIDEMARK_DB": "env-clip.db"},
+    )
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {"path": Path("env-clip.db"), "at_seconds": 12.5, "context_seconds": 2.0, "out_path": out_path}
+    ]
+
+
+def test_clip_bad_config_fails_before_delegation(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_clip(monkeypatch)
+    out_path = tmp_path / "clip.wav"
+    config_path = write_config(tmp_path, "[paths]\ndb = 12345")
+
+    result = invoke(["clip", "--at", "12.5", "--context", "2", "--out", str(out_path), "--config", str(config_path)])
+
+    assert calls == []
+    assert_redacted_config_error(
+        result,
+        raw_values=["12345", str(tmp_path), str(config_path), str(out_path)],
+        expected=["paths.db", "source=config", "[redacted-path]"],
+    )
+
+
+def test_clip_still_requires_explicit_at_and_out_even_with_config(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    calls = patch_clip(monkeypatch)
+    config_path = write_config(tmp_path, "[paths]\ndb = \"config-clip.db\"")
+
+    result = invoke(["clip", "--context", "2", "--config", str(config_path)])
+
+    assert result.exit_code != 0
+    assert calls == []
+    assert result.stdout == ""
+    assert "Traceback" not in result.stderr
