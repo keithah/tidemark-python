@@ -5,6 +5,9 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
+from tidemark.store import initialize_db, insert_segment, insert_transcript_words
+from tidemark.transcribe import WordToken
+
 
 CLI = Path(".venv/bin/tidemark")
 FIXTURE = Path("tests/fixtures/scte35_splice_null.ts")
@@ -64,6 +67,87 @@ def assert_redacted_diagnostics(stderr: str) -> None:
     assert "raw_base64" not in stderr
     assert "RawBase64" not in stderr
     assert "/DAR" not in stderr
+
+
+def create_search_fixture_db(db_path: Path) -> tuple[int, tuple[int, ...]]:
+    conn = initialize_db(db_path)
+    try:
+        segment_id = insert_segment(
+            conn,
+            source_url="https://example.test/live/channel.m3u8?token=secret",
+            sequence=3,
+            resolved_uri="https://cdn.example.test/media/segment-3.ts",
+            local_path=None,
+            start_ts=10.0,
+            duration_seconds=6.0,
+            byte_length=2048,
+            sha256="b" * 64,
+        )
+        word_ids = insert_transcript_words(
+            conn,
+            segment_id=segment_id,
+            source_url="https://example.test/live/channel.m3u8?token=secret",
+            segment_sequence=3,
+            words=(
+                WordToken(text="hello", start_ts=10.0, end_ts=10.4, confidence=0.95),
+                WordToken(text="tidemark", start_ts=10.5, end_ts=10.9, confidence=0.96),
+                WordToken(text="search", start_ts=11.0, end_ts=11.4, confidence=0.97),
+            ),
+        )
+        return segment_id, word_ids
+    finally:
+        conn.close()
+
+
+def test_installed_search_json_smoke_reads_transcript_words_from_sqlite(tmp_path: Path) -> None:
+    db_path = tmp_path / "transcripts.sqlite"
+    segment_id, word_ids = create_search_fixture_db(db_path)
+
+    result = run_tidemark("search", "tidemark", "--db", db_path, "--context", "1", "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    rows = json.loads(result.stdout)
+    assert isinstance(rows, list)
+    assert rows[0] == {
+        "source_url": "https://example.test/live/channel.m3u8?token=secret",
+        "segment_id": segment_id,
+        "segment_sequence": 3,
+        "hit_start_ts": 10.5,
+        "hit_end_ts": 10.9,
+        "context_start_ts": 10.0,
+        "context_end_ts": 11.4,
+        "context_text": "hello tidemark search",
+        "matched_text": "tidemark",
+        "word_ids": [word_ids[1]],
+    }
+
+
+def test_installed_search_json_no_match_returns_empty_array(tmp_path: Path) -> None:
+    db_path = tmp_path / "transcripts.sqlite"
+    create_search_fixture_db(db_path)
+
+    result = run_tidemark("search", "absent", "--db", db_path, "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert json.loads(result.stdout) == []
+
+
+def test_installed_search_missing_db_is_redacted_and_does_not_create_file(tmp_path: Path) -> None:
+    missing_db = tmp_path / "private-missing.sqlite"
+
+    result = run_tidemark("search", "private-query", "--db", missing_db, "--json")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert not missing_db.exists()
+    assert "[tidemark] error:" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert "private-query" not in result.stderr
+    assert "hello" not in result.stderr
+    assert str(missing_db) not in result.stderr
+    assert missing_db.name not in result.stderr
 
 
 def test_installed_monitor_fixture_emits_go_compatible_scte35_ndjson() -> None:
