@@ -128,6 +128,27 @@ def test_ingest_source_to_db_persists_segments_words_markers_and_searches(tmp_pa
     assert search_result.word_ids == result.transcript_word_ids[1:]
 
 
+def test_default_ingest_does_not_create_fingerprint_or_retained_audio_side_effects(tmp_path: Path) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "playlist.m3u8", media_path.name, include_cue=False)
+    db_path = tmp_path / "tidemark.sqlite3"
+
+    result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        include_manifest_markers=False,
+    )
+
+    assert result.issues == ()
+    assert len(result.segment_ids) == 1
+    assert len(result.transcript_word_ids) == 1
+    assert not (tmp_path / "tidemark-audio").exists()
+    assert _fetch_count(db_path, "songs") == 0
+    assert _fetch_count(db_path, "fingerprint_cache") == 0
+    assert _fetch_count(db_path, "retained_audio") == 0
+
+
 def test_load_fixture_transcript_accepts_json_array(tmp_path: Path) -> None:
     fixture_path = tmp_path / "transcript.json"
     fixture_path.write_text(

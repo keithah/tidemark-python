@@ -319,6 +319,7 @@ def test_ingest_help_lists_required_fixture_and_db_options(monkeypatch: pytest.M
     assert result.exit_code == 0
     assert "--db" in result.stdout
     assert "--fixture-transcript" in result.stdout
+    assert "--fingerprint" not in result.stdout
     assert monitor_calls == []
 
 
