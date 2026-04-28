@@ -21,6 +21,7 @@ class AdMarker:
     tag: str | None = None
     pts: float | None = None
     segment: int | None = None
+    break_duration: float | None = None
     raw_base64: str | None = None
     command: dict[str, Any] | None = None
     descriptors: list[dict[str, Any]] = field(default_factory=list)

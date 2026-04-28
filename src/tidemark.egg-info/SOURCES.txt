@@ -8,4 +8,7 @@ src/tidemark.egg-info/requires.txt
 src/tidemark.egg-info/top_level.txt
 src/tidemark/markers/__init__.py
 src/tidemark/markers/models.py
+src/tidemark/store/__init__.py
+src/tidemark/store/db.py
 tests/test_marker_models.py
+tests/test_store_db.py
