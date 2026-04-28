@@ -6,6 +6,7 @@ import click
 import typer
 from typer.core import TyperGroup
 
+from tidemark.cli.cmd_clip import clip
 from tidemark.cli.cmd_ingest import ingest
 from tidemark.cli.cmd_monitor import monitor
 from tidemark.cli.cmd_report import report
@@ -47,5 +48,6 @@ app.command(name="ingest")(ingest)
 app.command(name="monitor")(monitor)
 app.add_typer(report, name="report")
 app.command(name="search")(search)
+app.command(name="clip")(clip)
 
 __all__ = ["RootAliasGroup", "app", "root"]
