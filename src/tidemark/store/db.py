@@ -18,7 +18,7 @@ from typing import Any
 from tidemark.markers import AdMarker
 from tidemark.transcribe import WordToken
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 
 _SHA256_RE = re.compile(r"^[0-9a-fA-F]{64}$")
 
@@ -53,6 +53,64 @@ class TranscriptWordStoreRecord:
     end_ts: float
     confidence: float | None
     created_at: str
+
+
+@dataclass(frozen=True)
+class SongStoreRecord:
+    """Normalized song/fingerprint evidence row returned from the store."""
+
+    id: int
+    segment_id: int
+    source_url: str
+    segment_sequence: int
+    start_ts: float
+    duration_seconds: float
+    fingerprint: str
+    acoustid_id: str | None
+    recording_id: str | None
+    title: str | None
+    artist: str | None
+    album: str | None
+    score: float | None
+    lookup_source: str | None
+    created_at: str
+
+
+@dataclass(frozen=True)
+class FingerprintCacheRecord:
+    """Normalized cache row for a fingerprint lookup result."""
+
+    fingerprint: str
+    acoustid_id: str | None
+    recording_id: str | None
+    title: str | None
+    artist: str | None
+    album: str | None
+    score: float | None
+    raw_status: str | None
+    lookup_source: str | None
+    cached_at: str
+
+
+@dataclass(frozen=True)
+class RetainedAudioStoreRecord:
+    """Normalized retained-audio metadata row returned from the store."""
+
+    id: int
+    segment_id: int
+    source_url: str
+    segment_sequence: int
+    path: str
+    format: str
+    sample_rate: int
+    channels: int
+    sample_format: str
+    start_ts: float
+    duration_seconds: float
+    byte_length: int
+    sha256: str
+    created_at: str
+
 
 _CREATE_AD_EVENTS_SQL = """
 CREATE TABLE IF NOT EXISTS ad_events (
@@ -118,6 +176,62 @@ CREATE TABLE IF NOT EXISTS transcript_words (
 )
 """
 
+_CREATE_SONGS_SQL = """
+CREATE TABLE IF NOT EXISTS songs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id INTEGER NOT NULL,
+    source_url TEXT NOT NULL,
+    segment_sequence INTEGER NOT NULL,
+    start_ts REAL NOT NULL,
+    duration_seconds REAL NOT NULL,
+    fingerprint TEXT NOT NULL,
+    acoustid_id TEXT,
+    recording_id TEXT,
+    title TEXT,
+    artist TEXT,
+    album TEXT,
+    score REAL,
+    lookup_source TEXT,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (segment_id) REFERENCES segments(id)
+)
+"""
+
+_CREATE_FINGERPRINT_CACHE_SQL = """
+CREATE TABLE IF NOT EXISTS fingerprint_cache (
+    fingerprint TEXT PRIMARY KEY,
+    acoustid_id TEXT,
+    recording_id TEXT,
+    title TEXT,
+    artist TEXT,
+    album TEXT,
+    score REAL,
+    raw_status TEXT,
+    lookup_source TEXT,
+    cached_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
+)
+"""
+
+_CREATE_RETAINED_AUDIO_SQL = """
+CREATE TABLE IF NOT EXISTS retained_audio (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    segment_id INTEGER NOT NULL,
+    source_url TEXT NOT NULL,
+    segment_sequence INTEGER NOT NULL,
+    path TEXT NOT NULL,
+    format TEXT NOT NULL,
+    sample_rate INTEGER NOT NULL,
+    channels INTEGER NOT NULL,
+    sample_format TEXT NOT NULL,
+    start_ts REAL NOT NULL,
+    duration_seconds REAL NOT NULL,
+    byte_length INTEGER NOT NULL,
+    sha256 TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now')),
+    FOREIGN KEY (segment_id) REFERENCES segments(id)
+)
+"""
+
 _CREATE_TRANSCRIPT_WORDS_INDEX_SQL = (
     "CREATE INDEX IF NOT EXISTS idx_transcript_words_segment_order "
     "ON transcript_words(segment_id, word_index)",
@@ -125,6 +239,11 @@ _CREATE_TRANSCRIPT_WORDS_INDEX_SQL = (
     "ON transcript_words(source_url, start_ts, end_ts)",
     "CREATE INDEX IF NOT EXISTS idx_transcript_words_word "
     "ON transcript_words(word_text)",
+)
+
+_CREATE_RETAINED_AUDIO_INDEX_SQL = (
+    "CREATE INDEX IF NOT EXISTS idx_retained_audio_source_time "
+    "ON retained_audio(source_url, start_ts, duration_seconds)",
 )
 
 _INSERT_SEGMENT_SQL = """
@@ -154,6 +273,65 @@ INSERT INTO transcript_words (
 ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
 
+_INSERT_SONG_SQL = """
+INSERT INTO songs (
+    segment_id,
+    source_url,
+    segment_sequence,
+    start_ts,
+    duration_seconds,
+    fingerprint,
+    acoustid_id,
+    recording_id,
+    title,
+    artist,
+    album,
+    score,
+    lookup_source
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
+_UPSERT_FINGERPRINT_CACHE_SQL = """
+INSERT INTO fingerprint_cache (
+    fingerprint,
+    acoustid_id,
+    recording_id,
+    title,
+    artist,
+    album,
+    score,
+    raw_status,
+    lookup_source
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+ON CONFLICT(fingerprint) DO UPDATE SET
+    acoustid_id = excluded.acoustid_id,
+    recording_id = excluded.recording_id,
+    title = excluded.title,
+    artist = excluded.artist,
+    album = excluded.album,
+    score = excluded.score,
+    raw_status = excluded.raw_status,
+    lookup_source = excluded.lookup_source,
+    cached_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
+"""
+
+_INSERT_RETAINED_AUDIO_SQL = """
+INSERT INTO retained_audio (
+    segment_id,
+    source_url,
+    segment_sequence,
+    path,
+    format,
+    sample_rate,
+    channels,
+    sample_format,
+    start_ts,
+    duration_seconds,
+    byte_length,
+    sha256
+) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+"""
+
 
 def connect_db(path: str | bytes | PathLike[str] | PathLike[bytes]) -> sqlite3.Connection:
     """Open a SQLite connection for a caller-provided database path."""
@@ -170,7 +348,12 @@ def migrate(conn: sqlite3.Connection) -> None:
         conn.execute(_CREATE_AD_EVENTS_SQL)
         conn.execute(_CREATE_SEGMENTS_SQL)
         conn.execute(_CREATE_TRANSCRIPT_WORDS_SQL)
+        conn.execute(_CREATE_SONGS_SQL)
+        conn.execute(_CREATE_FINGERPRINT_CACHE_SQL)
+        conn.execute(_CREATE_RETAINED_AUDIO_SQL)
         for statement in _CREATE_TRANSCRIPT_WORDS_INDEX_SQL:
+            conn.execute(statement)
+        for statement in _CREATE_RETAINED_AUDIO_INDEX_SQL:
             conn.execute(statement)
         current_version = conn.execute("PRAGMA user_version").fetchone()[0]
         if current_version < SCHEMA_VERSION:
@@ -219,6 +402,14 @@ def _require_non_empty_string(name: str, value: str, *, function_name: str = "in
     return value
 
 
+def _require_optional_string(name: str, value: str | None, *, function_name: str) -> str | None:
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        raise TypeError(f"{function_name}() {name} must be a string or None")
+    return value
+
+
 def _require_int(name: str, value: int, *, minimum: int | None = None, function_name: str = "insert_segment") -> int:
     if not isinstance(value, int) or isinstance(value, bool):
         raise TypeError(f"{function_name}() {name} must be an integer")
@@ -242,6 +433,15 @@ def _require_number(
     return normalized
 
 
+def _require_score(score: int | float | None, *, function_name: str) -> float | None:
+    if score is None:
+        return None
+    normalized = _require_number("score", score, function_name=function_name)
+    if normalized < 0 or normalized > 1:
+        raise ValueError(f"{function_name}() score must be between 0 and 1")
+    return normalized
+
+
 def _normalize_metadata(metadata: dict[str, Any] | None) -> str | None:
     if metadata is None:
         return None
@@ -253,11 +453,11 @@ def _normalize_metadata(metadata: dict[str, Any] | None) -> str | None:
         raise TypeError("insert_segment() metadata must be JSON serializable") from exc
 
 
-def _normalize_sha256(sha256: str) -> str:
+def _normalize_sha256(sha256: str, *, function_name: str = "insert_segment") -> str:
     if not isinstance(sha256, str):
-        raise TypeError("insert_segment() sha256 must be a 64-character hex string")
+        raise TypeError(f"{function_name}() sha256 must be a 64-character hex string")
     if not _SHA256_RE.fullmatch(sha256):
-        raise ValueError("insert_segment() sha256 must be a 64-character hex string")
+        raise ValueError(f"{function_name}() sha256 must be a 64-character hex string")
     return sha256.lower()
 
 
@@ -437,4 +637,209 @@ def get_transcript_words_for_segment(
             created_at=row[9],
         )
         for row in rows
+    )
+
+
+def insert_song(
+    conn: sqlite3.Connection,
+    *,
+    segment_id: int,
+    source_url: str,
+    segment_sequence: int,
+    start_ts: int | float,
+    duration_seconds: int | float,
+    fingerprint: str,
+    acoustid_id: str | None = None,
+    recording_id: str | None = None,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+    score: int | float | None = None,
+    lookup_source: str | None = None,
+) -> int:
+    """Insert one song/fingerprint evidence row and return its SQLite row id."""
+    function_name = "insert_song"
+    values: tuple[Any, ...] = (
+        _require_int("segment_id", segment_id, minimum=0, function_name=function_name),
+        _require_non_empty_string("source_url", source_url, function_name=function_name),
+        _require_int("segment_sequence", segment_sequence, minimum=0, function_name=function_name),
+        _require_number("start_ts", start_ts, minimum=0, function_name=function_name),
+        _require_number("duration_seconds", duration_seconds, minimum=0, function_name=function_name),
+        _require_non_empty_string("fingerprint", fingerprint, function_name=function_name),
+        _require_optional_string("acoustid_id", acoustid_id, function_name=function_name),
+        _require_optional_string("recording_id", recording_id, function_name=function_name),
+        _require_optional_string("title", title, function_name=function_name),
+        _require_optional_string("artist", artist, function_name=function_name),
+        _require_optional_string("album", album, function_name=function_name),
+        _require_score(score, function_name=function_name),
+        _require_optional_string("lookup_source", lookup_source, function_name=function_name),
+    )
+    with conn:
+        cursor = conn.execute(_INSERT_SONG_SQL, values)
+    return int(cursor.lastrowid)
+
+
+def get_song(conn: sqlite3.Connection, row_id: int) -> SongStoreRecord | None:
+    """Fetch one song/fingerprint evidence row by id, or None when missing."""
+    normalized_row_id = _require_int("row_id", row_id, minimum=0, function_name="get_song")
+    row = conn.execute(
+        """
+        SELECT id, segment_id, source_url, segment_sequence, start_ts,
+               duration_seconds, fingerprint, acoustid_id, recording_id,
+               title, artist, album, score, lookup_source, created_at
+        FROM songs
+        WHERE id = ?
+        """,
+        (normalized_row_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return SongStoreRecord(
+        id=int(row[0]),
+        segment_id=int(row[1]),
+        source_url=row[2],
+        segment_sequence=int(row[3]),
+        start_ts=float(row[4]),
+        duration_seconds=float(row[5]),
+        fingerprint=row[6],
+        acoustid_id=row[7],
+        recording_id=row[8],
+        title=row[9],
+        artist=row[10],
+        album=row[11],
+        score=None if row[12] is None else float(row[12]),
+        lookup_source=row[13],
+        created_at=row[14],
+    )
+
+
+def insert_fingerprint_cache(
+    conn: sqlite3.Connection,
+    *,
+    fingerprint: str,
+    acoustid_id: str | None = None,
+    recording_id: str | None = None,
+    title: str | None = None,
+    artist: str | None = None,
+    album: str | None = None,
+    score: int | float | None = None,
+    raw_status: str | None = None,
+    lookup_source: str | None = None,
+) -> str:
+    """Upsert one fingerprint lookup cache row and return its fingerprint key."""
+    function_name = "insert_fingerprint_cache"
+    normalized_fingerprint = _require_non_empty_string("fingerprint", fingerprint, function_name=function_name)
+    values: tuple[Any, ...] = (
+        normalized_fingerprint,
+        _require_optional_string("acoustid_id", acoustid_id, function_name=function_name),
+        _require_optional_string("recording_id", recording_id, function_name=function_name),
+        _require_optional_string("title", title, function_name=function_name),
+        _require_optional_string("artist", artist, function_name=function_name),
+        _require_optional_string("album", album, function_name=function_name),
+        _require_score(score, function_name=function_name),
+        _require_optional_string("raw_status", raw_status, function_name=function_name),
+        _require_optional_string("lookup_source", lookup_source, function_name=function_name),
+    )
+    with conn:
+        conn.execute(_UPSERT_FINGERPRINT_CACHE_SQL, values)
+    return normalized_fingerprint
+
+
+def get_fingerprint_cache(conn: sqlite3.Connection, fingerprint: str) -> FingerprintCacheRecord | None:
+    """Fetch one fingerprint cache row by fingerprint, or None when missing."""
+    normalized_fingerprint = _require_non_empty_string(
+        "fingerprint", fingerprint, function_name="get_fingerprint_cache"
+    )
+    row = conn.execute(
+        """
+        SELECT fingerprint, acoustid_id, recording_id, title, artist, album,
+               score, raw_status, lookup_source, cached_at
+        FROM fingerprint_cache
+        WHERE fingerprint = ?
+        """,
+        (normalized_fingerprint,),
+    ).fetchone()
+    if row is None:
+        return None
+    return FingerprintCacheRecord(
+        fingerprint=row[0],
+        acoustid_id=row[1],
+        recording_id=row[2],
+        title=row[3],
+        artist=row[4],
+        album=row[5],
+        score=None if row[6] is None else float(row[6]),
+        raw_status=row[7],
+        lookup_source=row[8],
+        cached_at=row[9],
+    )
+
+
+def insert_retained_audio(
+    conn: sqlite3.Connection,
+    *,
+    segment_id: int,
+    source_url: str,
+    segment_sequence: int,
+    path: str,
+    format: str,
+    sample_rate: int,
+    channels: int,
+    sample_format: str,
+    start_ts: int | float,
+    duration_seconds: int | float,
+    byte_length: int,
+    sha256: str,
+) -> int:
+    """Insert one retained-audio metadata row and return its SQLite row id."""
+    function_name = "insert_retained_audio"
+    values: tuple[Any, ...] = (
+        _require_int("segment_id", segment_id, minimum=0, function_name=function_name),
+        _require_non_empty_string("source_url", source_url, function_name=function_name),
+        _require_int("segment_sequence", segment_sequence, minimum=0, function_name=function_name),
+        _require_non_empty_string("path", path, function_name=function_name),
+        _require_non_empty_string("format", format, function_name=function_name),
+        _require_int("sample_rate", sample_rate, minimum=1, function_name=function_name),
+        _require_int("channels", channels, minimum=1, function_name=function_name),
+        _require_non_empty_string("sample_format", sample_format, function_name=function_name),
+        _require_number("start_ts", start_ts, minimum=0, function_name=function_name),
+        _require_number("duration_seconds", duration_seconds, minimum=0, function_name=function_name),
+        _require_int("byte_length", byte_length, minimum=0, function_name=function_name),
+        _normalize_sha256(sha256, function_name=function_name),
+    )
+    with conn:
+        cursor = conn.execute(_INSERT_RETAINED_AUDIO_SQL, values)
+    return int(cursor.lastrowid)
+
+
+def get_retained_audio(conn: sqlite3.Connection, row_id: int) -> RetainedAudioStoreRecord | None:
+    """Fetch one retained-audio metadata row by id, or None when missing."""
+    normalized_row_id = _require_int("row_id", row_id, minimum=0, function_name="get_retained_audio")
+    row = conn.execute(
+        """
+        SELECT id, segment_id, source_url, segment_sequence, path, format,
+               sample_rate, channels, sample_format, start_ts, duration_seconds,
+               byte_length, sha256, created_at
+        FROM retained_audio
+        WHERE id = ?
+        """,
+        (normalized_row_id,),
+    ).fetchone()
+    if row is None:
+        return None
+    return RetainedAudioStoreRecord(
+        id=int(row[0]),
+        segment_id=int(row[1]),
+        source_url=row[2],
+        segment_sequence=int(row[3]),
+        path=row[4],
+        format=row[5],
+        sample_rate=int(row[6]),
+        channels=int(row[7]),
+        sample_format=row[8],
+        start_ts=float(row[9]),
+        duration_seconds=float(row[10]),
+        byte_length=int(row[11]),
+        sha256=row[12],
+        created_at=row[13],
     )

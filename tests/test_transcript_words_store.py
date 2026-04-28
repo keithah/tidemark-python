@@ -14,7 +14,7 @@ from tidemark.store import (
 from tidemark.transcribe import WordToken
 
 
-EXPECTED_TABLES = ["ad_events", "segments", "transcript_words"]
+EXPECTED_TABLES = ["ad_events", "fingerprint_cache", "retained_audio", "segments", "songs", "transcript_words"]
 EXPECTED_TRANSCRIPT_WORD_COLUMNS = [
     "id",
     "segment_id",
@@ -61,16 +61,16 @@ def insert_fixture_segment(conn: sqlite3.Connection) -> int:
     )
 
 
-def test_migrate_creates_schema_v3_transcript_words_table_and_indexes():
+def test_migrate_creates_schema_v4_transcript_words_table_and_indexes():
     conn = sqlite3.connect(":memory:")
 
     migrate(conn)
 
-    assert SCHEMA_VERSION == 3
+    assert SCHEMA_VERSION == 4
     assert table_names(conn) == EXPECTED_TABLES
     assert [row[1] for row in conn.execute("PRAGMA table_info(transcript_words)")] == EXPECTED_TRANSCRIPT_WORD_COLUMNS
     assert index_names(conn, "transcript_words") == EXPECTED_TRANSCRIPT_WORD_INDEXES
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 3
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 4
 
 
 def test_insert_transcript_words_preserves_order_context_and_fetches_typed_records():
