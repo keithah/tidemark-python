@@ -5,7 +5,10 @@ import sqlite3
 import subprocess
 from pathlib import Path
 
-from tidemark.store import initialize_db, insert_segment, insert_transcript_words
+import pytest
+
+from tidemark.markers import AdMarker
+from tidemark.store import initialize_db, insert_ad_event, insert_segment, insert_song, insert_transcript_words, migrate
 from tidemark.transcribe import WordToken
 
 
@@ -97,6 +100,236 @@ def create_search_fixture_db(db_path: Path) -> tuple[int, tuple[int, ...]]:
         return segment_id, word_ids
     finally:
         conn.close()
+
+
+def create_report_fixture_db(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        migrate(conn)
+        first_segment_id = insert_segment(
+            conn,
+            source_url="fixture://stream-a",
+            sequence=10,
+            resolved_uri="fixture://segment-10.ts",
+            local_path=None,
+            start_ts=12.0,
+            duration_seconds=6.0,
+            byte_length=1024,
+            sha256="1" * 64,
+        )
+        second_segment_id = insert_segment(
+            conn,
+            source_url="fixture://stream-a",
+            sequence=11,
+            resolved_uri="fixture://segment-11.ts",
+            local_path=None,
+            start_ts=32.0,
+            duration_seconds=6.0,
+            byte_length=1024,
+            sha256="2" * 64,
+        )
+        low_score_segment_id = insert_segment(
+            conn,
+            source_url="fixture://stream-a",
+            sequence=12,
+            resolved_uri="fixture://segment-12.ts",
+            local_path=None,
+            start_ts=52.0,
+            duration_seconds=6.0,
+            byte_length=1024,
+            sha256="3" * 64,
+        )
+        insert_song(
+            conn,
+            segment_id=first_segment_id,
+            source_url="fixture://stream-a",
+            segment_sequence=10,
+            start_ts=12.0,
+            duration_seconds=6.0,
+            fingerprint="fingerprint-first",
+            acoustid_id="acoustid-repeat",
+            recording_id="recording-repeat",
+            title="Repeat Needle",
+            artist="Needle Artist",
+            album="Needle Album",
+            score=0.95,
+            lookup_source="fixture",
+        )
+        insert_song(
+            conn,
+            segment_id=second_segment_id,
+            source_url="fixture://stream-a",
+            segment_sequence=11,
+            start_ts=32.0,
+            duration_seconds=6.0,
+            fingerprint="fingerprint-second",
+            acoustid_id="acoustid-repeat",
+            recording_id="recording-repeat",
+            title="Repeat Needle",
+            artist="Needle Artist",
+            album="Needle Album",
+            score=0.91,
+            lookup_source="fixture",
+        )
+        insert_song(
+            conn,
+            segment_id=low_score_segment_id,
+            source_url="fixture://stream-a",
+            segment_sequence=12,
+            start_ts=52.0,
+            duration_seconds=6.0,
+            fingerprint="fingerprint-low",
+            acoustid_id="acoustid-low",
+            recording_id="recording-low",
+            title="Low Score Needle",
+            artist="Needle Artist",
+            album="Needle Album",
+            score=0.79,
+            lookup_source="fixture",
+        )
+        insert_ad_event(
+            conn,
+            "fixture://stream-a",
+            AdMarker(
+                type="SCTE35",
+                classification="BREAK_START",
+                source="fixture",
+                segment=10,
+                pts=13.5,
+                break_duration=30.0,
+                timestamp=13.5,
+            ),
+        )
+        insert_ad_event(
+            conn,
+            "fixture://stream-a",
+            AdMarker(
+                type="SCTE35",
+                classification="BREAK_START",
+                source="fixture",
+                segment=11,
+                pts=35.0,
+                break_duration=15.0,
+                timestamp=35.0,
+            ),
+        )
+    finally:
+        conn.close()
+
+
+def create_empty_report_db(db_path: Path) -> None:
+    conn = sqlite3.connect(db_path)
+    try:
+        migrate(conn)
+    finally:
+        conn.close()
+
+
+def test_installed_report_json_reads_schema_v4_timeline_from_sqlite(tmp_path: Path) -> None:
+    db_path = tmp_path / "reports.sqlite"
+    create_report_fixture_db(db_path)
+
+    plays = run_tidemark("report", "plays", "--db", db_path, "--json")
+    repeats = run_tidemark("report", "repeats", "--db", db_path, "--json")
+    ads = run_tidemark("report", "ads", "--db", db_path, "--json")
+
+    assert plays.returncode == 0, plays.stderr
+    assert repeats.returncode == 0, repeats.stderr
+    assert ads.returncode == 0, ads.stderr
+    assert plays.stderr == ""
+    assert repeats.stderr == ""
+    assert ads.stderr == ""
+    assert json.loads(plays.stdout) == [
+        {
+            "song_id": 1,
+            "source_url": "fixture://stream-a",
+            "segment_id": 1,
+            "segment_sequence": 10,
+            "start_ts": 12.0,
+            "duration_seconds": 6.0,
+            "title": "Repeat Needle",
+            "artist": "Needle Artist",
+            "album": "Needle Album",
+            "score": 0.95,
+            "acoustid_id": "acoustid-repeat",
+            "recording_id": "recording-repeat",
+            "lookup_source": "fixture",
+        },
+        {
+            "song_id": 2,
+            "source_url": "fixture://stream-a",
+            "segment_id": 2,
+            "segment_sequence": 11,
+            "start_ts": 32.0,
+            "duration_seconds": 6.0,
+            "title": "Repeat Needle",
+            "artist": "Needle Artist",
+            "album": "Needle Album",
+            "score": 0.91,
+            "acoustid_id": "acoustid-repeat",
+            "recording_id": "recording-repeat",
+            "lookup_source": "fixture",
+        },
+    ]
+    assert "Low Score Needle" not in plays.stdout
+    assert json.loads(repeats.stdout) == [
+        {
+            "identity": "recording:recording-repeat",
+            "title": "Repeat Needle",
+            "artist": "Needle Artist",
+            "album": "Needle Album",
+            "count": 2,
+            "first_start_ts": 12.0,
+            "last_start_ts": 32.0,
+            "source_urls": ["fixture://stream-a"],
+            "song_ids": [1, 2],
+            "best_score": 0.95,
+            "acoustid_id": "acoustid-repeat",
+            "recording_id": "recording-repeat",
+        }
+    ]
+    assert "Low Score Needle" not in repeats.stdout
+    assert json.loads(ads.stdout) == [
+        {
+            "source_url": "fixture://stream-a",
+            "classification": "BREAK_START",
+            "marker_type": "SCTE35",
+            "count": 2,
+            "first_ts": 13.5,
+            "last_ts": 35.0,
+            "total_break_duration": 45.0,
+        }
+    ]
+
+
+@pytest.mark.parametrize("report_args", [("plays",), ("repeats",), ("ads",)])
+def test_installed_report_json_empty_database_returns_empty_array(tmp_path: Path, report_args: tuple[str, ...]) -> None:
+    db_path = tmp_path / "empty-reports.sqlite"
+    create_empty_report_db(db_path)
+
+    result = run_tidemark("report", *report_args, "--db", db_path, "--json")
+
+    assert result.returncode == 0, result.stderr
+    assert result.stderr == ""
+    assert result.stdout == "[]\n"
+
+
+@pytest.mark.parametrize("report_args", [("plays",), ("repeats",), ("ads",)])
+def test_installed_report_missing_db_is_redacted_and_does_not_create_file(
+    tmp_path: Path,
+    report_args: tuple[str, ...],
+) -> None:
+    missing_db = tmp_path / "private-report-missing.sqlite"
+
+    result = run_tidemark("report", *report_args, "--db", missing_db, "--json")
+
+    assert result.returncode == 1
+    assert result.stdout == ""
+    assert not missing_db.exists()
+    assert "[tidemark] error: database path does not exist" in result.stderr
+    assert "Traceback" not in result.stderr
+    assert str(missing_db) not in result.stderr
+    assert missing_db.name not in result.stderr
 
 
 def test_installed_search_json_smoke_reads_transcript_words_from_sqlite(tmp_path: Path) -> None:
