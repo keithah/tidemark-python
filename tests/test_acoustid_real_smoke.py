@@ -153,6 +153,8 @@ def test_real_acoustid_lookup_smoke_is_key_gated_and_redacted(tmp_path: Path) ->
         message = str(exc)
         for secret in SECRET_VALUES:
             assert secret not in message
+        if exc.phase == "parse" and exc.status == "error":
+            pytest.xfail("ACOUSTID_API_KEY was rejected by AcoustID; failure was redacted")
         raise
 
     assert isinstance(result, AcoustIDLookupResult)

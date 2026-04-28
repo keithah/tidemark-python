@@ -33,6 +33,8 @@ class IngestPipelineResult:
     transcript_word_ids: tuple[int, ...]
     ad_event_ids: tuple[int, ...]
     issues: tuple[IngestIssue, ...]
+    retained_audio_ids: tuple[int, ...] = ()
+    song_ids: tuple[int, ...] = ()
 
 
 class TranscriptFixtureError(ValueError):
@@ -61,14 +63,23 @@ def ingest_source_to_db(
     source: str | Path,
     *,
     db_path: str | Path,
-    transcriber: Transcriber,
+    transcriber: Transcriber | None,
     source_url: str | None = None,
     include_manifest_markers: bool = True,
+    fingerprint: bool = False,
+    fingerprint_backend: Any = None,
+    lookup_adapter: Any = None,
+    acoustid_api_key: str | None = None,
+    lookup_timeout_seconds: float | None = None,
+    retention_dir: str | Path | None = None,
 ) -> IngestPipelineResult:
-    """Resolve, store, decode, transcribe, and search-proof local media input.
+    """Resolve, store, decode, and optionally transcribe/fingerprint local media input.
 
     The pipeline is intentionally local-only: source resolution is delegated to
     ``resolve_segments()``, which rejects network URLs with redacted diagnostics.
+    Optional branches are independent so transcription, retention, fingerprint,
+    and lookup failures surface as redacted per-segment issues without blocking
+    later optional work for the same decoded segment.
     """
     segments = resolve_segments(source, source_url=source_url)
     from tidemark.store import initialize_db, insert_transcript_words
@@ -77,6 +88,8 @@ def ingest_source_to_db(
     try:
         segment_ids: list[int] = []
         transcript_word_ids: list[int] = []
+        retained_audio_ids: list[int] = []
+        song_ids: list[int] = []
         ad_event_ids = _insert_manifest_markers(
             conn,
             source,
@@ -96,35 +109,52 @@ def ingest_source_to_db(
             except AudioDecodeError as exc:
                 issues.append(_issue("decode", segment.sequence, str(exc)))
                 continue
-            except Exception as exc:
+            except Exception:
                 issues.append(_issue("decode", segment.sequence, "audio decode failed"))
                 continue
 
-            try:
-                transcript = transcriber.transcribe(chunk)
-            except Exception:
-                issues.append(_issue("transcribe", segment.sequence, "transcription failed"))
-                continue
+            if transcriber is not None:
+                try:
+                    transcript = transcriber.transcribe(chunk)
+                except Exception:
+                    issues.append(_issue("transcribe", segment.sequence, "transcription failed"))
+                else:
+                    try:
+                        transcript_word_ids.extend(
+                            insert_transcript_words(
+                                conn,
+                                segment_id=segment_id,
+                                source_url=chunk.source_url,
+                                segment_sequence=chunk.segment_sequence,
+                                words=transcript.words,
+                            )
+                        )
+                    except Exception as exc:
+                        issues.append(_issue("store_transcript", segment.sequence, _safe_store_message(exc)))
 
-            try:
-                transcript_word_ids.extend(
-                    insert_transcript_words(
-                        conn,
-                        segment_id=segment_id,
-                        source_url=chunk.source_url,
-                        segment_sequence=chunk.segment_sequence,
-                        words=transcript.words,
-                    )
+            if fingerprint:
+                _run_fingerprint_branches(
+                    conn,
+                    db_path=db_path,
+                    chunk=chunk,
+                    segment_id=segment_id,
+                    fingerprint_backend=fingerprint_backend,
+                    lookup_adapter=lookup_adapter,
+                    acoustid_api_key=acoustid_api_key,
+                    lookup_timeout_seconds=lookup_timeout_seconds,
+                    retention_dir=retention_dir,
+                    retained_audio_ids=retained_audio_ids,
+                    song_ids=song_ids,
+                    issues=issues,
                 )
-            except Exception as exc:
-                issues.append(_issue("store_transcript", segment.sequence, _safe_store_message(exc)))
-                continue
 
         return IngestPipelineResult(
             segment_ids=tuple(segment_ids),
             transcript_word_ids=tuple(transcript_word_ids),
             ad_event_ids=tuple(ad_event_ids),
             issues=tuple(issues),
+            retained_audio_ids=tuple(retained_audio_ids),
+            song_ids=tuple(song_ids),
         )
     finally:
         conn.close()
@@ -220,6 +250,89 @@ def _insert_manifest_markers(
     except Exception as exc:
         raise RuntimeError("pipeline manifest marker store failed") from exc
     return marker_ids
+
+
+def _run_fingerprint_branches(
+    conn: Any,
+    *,
+    db_path: str | Path,
+    chunk: Any,
+    segment_id: int,
+    fingerprint_backend: Any,
+    lookup_adapter: Any,
+    acoustid_api_key: str | None,
+    lookup_timeout_seconds: float | None,
+    retention_dir: str | Path | None,
+    retained_audio_ids: list[int],
+    song_ids: list[int],
+    issues: list[IngestIssue],
+) -> None:
+    sequence = chunk.segment_sequence
+
+    try:
+        from tidemark.fingerprint import RetentionError, write_retained_audio
+        from tidemark.store import insert_retained_audio
+
+        retained = write_retained_audio(chunk, db_path=db_path, retention_dir=retention_dir)
+        try:
+            retained_audio_ids.append(
+                insert_retained_audio(
+                    conn,
+                    segment_id=segment_id,
+                    source_url=chunk.source_url,
+                    segment_sequence=chunk.segment_sequence,
+                    path=str(retained.path),
+                    format=retained.format,
+                    sample_rate=retained.sample_rate,
+                    channels=retained.channels,
+                    sample_format=retained.sample_format,
+                    start_ts=retained.start_ts,
+                    duration_seconds=retained.duration_seconds,
+                    byte_length=retained.byte_length,
+                    sha256=retained.sha256,
+                )
+            )
+        except Exception:
+            issues.append(_issue("store_retained_audio", sequence, "retained audio store failed"))
+    except RetentionError as exc:
+        issues.append(_issue("retain_audio", sequence, str(exc)))
+    except Exception:
+        issues.append(_issue("retain_audio", sequence, "retention failed"))
+
+    try:
+        from tidemark.fingerprint import FingerprintError, fingerprint_audio_chunk
+
+        fingerprint_result = fingerprint_audio_chunk(chunk, backend=fingerprint_backend)
+    except FingerprintError:
+        issues.append(_issue("fingerprint", sequence, "fingerprint failed"))
+        return
+    except Exception:
+        issues.append(_issue("fingerprint", sequence, "fingerprint failed"))
+        return
+
+    try:
+        from tidemark.fingerprint import AcoustIDLookupError, PyAcoustIDLookupAdapter, identify_fingerprint
+
+        identification = identify_fingerprint(
+            conn,
+            fingerprint_result,
+            segment_id,
+            lookup_adapter or PyAcoustIDLookupAdapter(),
+            api_key=acoustid_api_key,
+            timeout_seconds=lookup_timeout_seconds,
+        )
+        song_ids.append(identification.song_id)
+    except AcoustIDLookupError as exc:
+        issues.append(_issue("lookup", sequence, _safe_lookup_message(exc)))
+    except Exception:
+        issues.append(_issue("lookup", sequence, "lookup failed"))
+
+
+def _safe_lookup_message(exc: Exception) -> str:
+    status = getattr(exc, "status", None)
+    if isinstance(status, str) and status.strip():
+        return f"lookup {status.strip()}"
+    return "lookup failed"
 
 
 def _issue(phase: str, segment_sequence: int | None, message: str) -> IngestIssue:
