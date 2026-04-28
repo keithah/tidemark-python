@@ -37,8 +37,8 @@ def test_migrate_creates_ad_events_schema_and_sets_user_version():
 
     migrate(conn)
 
-    assert table_names(conn) == ["ad_events"]
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 1
+    assert table_names(conn) == ["ad_events", "segments"]
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION == 2
     columns = [row[1] for row in conn.execute("PRAGMA table_info(ad_events)")]
     assert columns == EXPECTED_COLUMNS
 
@@ -47,12 +47,12 @@ def test_migrate_is_idempotent_and_does_not_downgrade_user_version():
     conn = sqlite3.connect(":memory:")
 
     migrate(conn)
-    conn.execute("PRAGMA user_version = 2")
+    conn.execute("PRAGMA user_version = 99")
     migrate(conn)
 
-    assert table_names(conn) == ["ad_events"]
+    assert table_names(conn) == ["ad_events", "segments"]
     assert conn.execute("select count(*) from sqlite_master where type = 'table' and name = 'ad_events'").fetchone()[0] == 1
-    assert conn.execute("PRAGMA user_version").fetchone()[0] == 2
+    assert conn.execute("PRAGMA user_version").fetchone()[0] == 99
 
 
 def test_insert_ad_event_writes_normalized_columns_and_raw_marker_json():
