@@ -364,6 +364,63 @@ tidemark = "tidemark.cli.main:app"
 
 ---
 
+## Standalone executable packaging
+
+This section documents the reproducible workflow for building and smoke-testing the `dist/tidemark` ELF on the current host. The proof is Linux x86_64 only; macOS arm64 and cross-platform release artifacts require native CI/release expansion.
+
+### Prerequisites
+
+Install the dev extra (includes `pyinstaller`) into the repo venv:
+
+```sh
+.venv/bin/python -m pip install -e ".[dev]"
+```
+
+### Build
+
+Run PyInstaller from a clean spec invocation. The spec lives at `tidemark.spec` in the repo root and bundles `imageio-ffmpeg`, all `tidemark.*` submodules, and the editable `threefive` checkout via `pathex`:
+
+```sh
+.venv/bin/python -m PyInstaller --clean --noconfirm tidemark.spec
+```
+
+Output: `dist/tidemark` (ELF, self-contained, no Python install required at runtime).
+
+> **Note:** `threefive` is declared as a runtime dependency and its installed source root is included in `pathex` inside `tidemark.spec`. If you move the venv or the editable threefive checkout, update the `pathex` entry and rebuild.
+
+### Packaged smoke tests
+
+Run the env-gated smoke harness against the freshly built binary. The `TIDEMARK_PACKAGED_CLI` env var tells the harness which absolute binary path to use; tests are skipped when the var is unset (so normal `pytest` runs never require `dist/`):
+
+```sh
+TIDEMARK_PACKAGED_CLI="$PWD/dist/tidemark" .venv/bin/python -m pytest tests/test_packaging_smoke.py -v
+```
+
+Smoke coverage: `--help`, `status` (no runs), `monitor` fixture/timeout, `ingest` restart dedup, `search`, `report`, `clip`, and redaction checks. All run from temp working directories to avoid contaminating the repo DB.
+
+### Installed CLI integration tests
+
+These tests exercise the installed `.venv/bin/tidemark` binary (not the frozen executable) and form the existing regression baseline:
+
+```sh
+.venv/bin/python -m pytest tests/test_cli_integration.py tests/test_cli_ingest_integration.py -v
+```
+
+### Full regression suite
+
+```sh
+.venv/bin/python -m pytest
+```
+
+### Platform scope
+
+- This build produces a Linux x86_64 ELF tied to the current glibc version.
+- macOS arm64 proof requires a native macOS build runner.
+- Release artifact automation (signing, notarization, cross-platform CI, checksums) is future M004+ distribution work, not covered here.
+- Live AcoustID fingerprinting is not exercised by packaged smoke; the clip smoke uses a deterministic pre-seeded SQLite fixture.
+
+---
+
 ## Open Questions (parked)
 
 - **M001 S010 parity test:** Needs 3–4 real stream URLs (HLS + Icecast + one MPEGTS). Can use TuneIn streams — Keith has access.

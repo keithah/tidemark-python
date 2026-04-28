@@ -78,6 +78,7 @@ tests/test_marker_models.py
 tests/test_monitor.py
 tests/test_monitor_sources.py
 tests/test_mpegts_ingest.py
+tests/test_packaging_smoke.py
 tests/test_packaging_spec.py
 tests/test_parity_normalization.py
 tests/test_reports.py
