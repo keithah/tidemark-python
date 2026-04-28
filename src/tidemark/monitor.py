@@ -7,19 +7,26 @@ iterable) of :class:`tidemark.markers.AdMarker` values plus injected output stre
 
 from __future__ import annotations
 
+import re
 import time
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from os import PathLike
 from pathlib import Path
 from typing import Literal, TextIO
+from urllib.parse import urlparse
 
 from tidemark.markers import AD_END, AD_START, UNKNOWN, AdMarker, Classifier
+from tidemark.monitor_sources import MonitorSourceError, StreamType
+from tidemark.runtime.health import redact_source_label
+from tidemark.runtime.retry import RetryPolicy
 import tidemark.store.db as db
 
 MonitorReason = Literal["eof", "timeout", "interrupted", "error"]
 MarkerFilter = Literal["all", "ad", "AD_START", "AD_END", "UNKNOWN", "scte35", "id3", "icy"]
-MonitorPhase = Literal["running", "completed", "error"]
+MonitorPhase = Literal["running", "retrying", "completed", "error"]
+RetrySleep = Callable[[float], None]
 
 
 @dataclass(frozen=True)
@@ -30,12 +37,17 @@ class MonitorProgress:
     counters: dict[str, int]
     reason: MonitorReason | None = None
     error: str | None = None
+    retry_attempt: int | None = None
+    delay_seconds: float | None = None
+    next_retry_at: datetime | None = None
 
 
 MonitorProgressCallback = Callable[[MonitorProgress], None]
 
 _MARKER_TYPE_FILTERS = {"scte35", "id3", "icy"}
 _VALID_FILTERS = {"all", "ad", AD_START, AD_END, UNKNOWN, *_MARKER_TYPE_FILTERS}
+_RETRYABLE_STREAM_TYPES = {StreamType.HLS, StreamType.ICY, StreamType.UDP}
+_PAYLOAD_ASSIGNMENT_RE = re.compile(r"(?i)\b(raw[_-]?base64|payload)\s*[=:]\s*[^\s&]+")
 
 
 @dataclass(frozen=True)
@@ -50,6 +62,8 @@ class MonitorOptions:
     clock: Callable[[], float] = time.monotonic
     emit_summary: bool = True
     progress_callback: MonitorProgressCallback | None = None
+    retry_policy: RetryPolicy | None = None
+    retry_sleep: RetrySleep = time.sleep
 
 
 @dataclass(frozen=True)
@@ -70,6 +84,13 @@ class _MonitorState:
     markers_emitted: int = 0
     markers_filtered: int = 0
     sink_warnings: int = 0
+
+
+@dataclass(frozen=True)
+class _RetryOutcome:
+    retried: bool
+    terminal_reason: MonitorReason | None = None
+    terminal_error: str | None = None
 
 
 def run_monitor(
@@ -124,31 +145,13 @@ def run_monitor(
 
     classifier = Classifier()
     start_time = active_options.clock()
+    next_retry_attempt = 1
     _notify_progress(active_options.progress_callback, "running", state)
 
     try:
-        iterator = _iter_marker_source(marker_source)
-
         while True:
-            if _timed_out(active_options, start_time):
-                return _finish(
-                    "timeout",
-                    state,
-                    stderr,
-                    emit_summary=active_options.emit_summary,
-                    progress_callback=active_options.progress_callback,
-                )
-
             try:
-                item = next(iterator)
-            except StopIteration:
-                return _finish(
-                    "eof",
-                    state,
-                    stderr,
-                    emit_summary=active_options.emit_summary,
-                    progress_callback=active_options.progress_callback,
-                )
+                iterator = _iter_marker_source(marker_source)
             except KeyboardInterrupt:
                 return _finish(
                     "interrupted",
@@ -157,73 +160,146 @@ def run_monitor(
                     emit_summary=active_options.emit_summary,
                     progress_callback=active_options.progress_callback,
                 )
-            except Exception:
+            except Exception as exc:
+                retry = _maybe_retry_source_failure(
+                    exc,
+                    next_retry_attempt,
+                    state,
+                    active_options,
+                    start_time,
+                )
+                if retry.retried:
+                    next_retry_attempt += 1
+                    continue
+                if retry.terminal_reason == "timeout":
+                    return _finish(
+                        "timeout",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
                 return _fatal_result(
-                    "marker iterator failed",
+                    retry.terminal_error or _source_error_message(exc, fallback="marker source setup failed"),
                     state,
                     stderr,
                     emit_summary=active_options.emit_summary,
                     progress_callback=active_options.progress_callback,
                 )
 
-            if not isinstance(item, AdMarker):
-                return _fatal_result(
-                    "marker source yielded non-AdMarker value",
-                    state,
-                    stderr,
-                    emit_summary=active_options.emit_summary,
-                    progress_callback=active_options.progress_callback,
-                )
+            while True:
+                if _timed_out(active_options, start_time):
+                    return _finish(
+                        "timeout",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
 
-            state.markers_seen += 1
-            classifier.classify(item)
-            if not _matches_filter(item, normalized_filter):
-                state.markers_filtered += 1
+                try:
+                    item = next(iterator)
+                except StopIteration:
+                    return _finish(
+                        "eof",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
+                except KeyboardInterrupt:
+                    return _finish(
+                        "interrupted",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
+                except Exception as exc:
+                    retry = _maybe_retry_source_failure(
+                        exc,
+                        next_retry_attempt,
+                        state,
+                        active_options,
+                        start_time,
+                    )
+                    if retry.retried:
+                        next_retry_attempt += 1
+                        break
+                    if retry.terminal_reason == "timeout":
+                        return _finish(
+                            "timeout",
+                            state,
+                            stderr,
+                            emit_summary=active_options.emit_summary,
+                            progress_callback=active_options.progress_callback,
+                        )
+                    return _fatal_result(
+                        retry.terminal_error or _source_error_message(exc, fallback="marker iterator failed"),
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
+
+                if not isinstance(item, AdMarker):
+                    return _fatal_result(
+                        "marker source yielded non-AdMarker value",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
+
+                state.markers_seen += 1
+                classifier.classify(item)
+                if not _matches_filter(item, normalized_filter):
+                    state.markers_filtered += 1
+                    _notify_progress(active_options.progress_callback, "running", state)
+                    continue
+
+                try:
+                    raw_json = item.to_json()
+                except Exception:
+                    return _fatal_result(
+                        "marker serialization failed",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
+
+                try:
+                    stdout.write(raw_json)
+                    stdout.write("\n")
+                    stdout.flush()
+                except Exception:
+                    return _fatal_result(
+                        "stdout write failed",
+                        state,
+                        stderr,
+                        emit_summary=active_options.emit_summary,
+                        progress_callback=active_options.progress_callback,
+                    )
+
+                state.markers_emitted += 1
+                if json_handle is not None:
+                    try:
+                        json_handle.write(raw_json)
+                        json_handle.write("\n")
+                        json_handle.flush()
+                    except Exception:
+                        state.sink_warnings += 1
+                        _warn("json-out write failed", stderr)
+
+                if db_conn is not None:
+                    try:
+                        db.insert_ad_event(db_conn, active_options.source_url, item)  # type: ignore[arg-type]
+                    except Exception:
+                        state.sink_warnings += 1
+                        _warn("database write failed", stderr)
+
                 _notify_progress(active_options.progress_callback, "running", state)
-                continue
-
-            try:
-                raw_json = item.to_json()
-            except Exception:
-                return _fatal_result(
-                    "marker serialization failed",
-                    state,
-                    stderr,
-                    emit_summary=active_options.emit_summary,
-                    progress_callback=active_options.progress_callback,
-                )
-
-            try:
-                stdout.write(raw_json)
-                stdout.write("\n")
-                stdout.flush()
-            except Exception:
-                return _fatal_result(
-                    "stdout write failed",
-                    state,
-                    stderr,
-                    emit_summary=active_options.emit_summary,
-                    progress_callback=active_options.progress_callback,
-                )
-
-            state.markers_emitted += 1
-            if json_handle is not None:
-                try:
-                    json_handle.write(raw_json)
-                    json_handle.write("\n")
-                    json_handle.flush()
-                except Exception:
-                    state.sink_warnings += 1
-                    _warn("json-out write failed", stderr)
-
-            if db_conn is not None:
-                try:
-                    db.insert_ad_event(db_conn, active_options.source_url, item)  # type: ignore[arg-type]
-                except Exception:
-                    state.sink_warnings += 1
-                    _warn("database write failed", stderr)
-
-            _notify_progress(active_options.progress_callback, "running", state)
     finally:
         _close_handle(json_handle)
         _close_handle(db_conn)
@@ -264,6 +340,80 @@ def _timed_out(options: MonitorOptions, start_time: float) -> bool:
     if options.timeout is None:
         return False
     return options.clock() - start_time >= options.timeout
+
+
+def _remaining_timeout(options: MonitorOptions, start_time: float) -> float | None:
+    if options.timeout is None:
+        return None
+    return max(0.0, options.timeout - (options.clock() - start_time))
+
+
+def _datetime_from_seconds(seconds: float) -> datetime:
+    return datetime.fromtimestamp(seconds, timezone.utc)
+
+
+def _maybe_retry_source_failure(
+    exc: Exception,
+    attempt: int,
+    state: _MonitorState,
+    options: MonitorOptions,
+    start_time: float,
+) -> _RetryOutcome:
+    if not _is_retryable_source_error(exc, options):
+        return _RetryOutcome(retried=False)
+
+    policy = options.retry_policy or RetryPolicy()
+    observed_now = options.clock()
+    decision = policy.decision_for_attempt(attempt, now=_datetime_from_seconds(observed_now))
+    redacted_error = _source_error_message(exc, fallback="marker iterator failed")
+    if decision is None:
+        return _RetryOutcome(retried=False, terminal_error=redacted_error)
+
+    remaining = None if options.timeout is None else max(0.0, options.timeout - (observed_now - start_time))
+    if remaining is not None and remaining <= 0:
+        return _RetryOutcome(retried=False, terminal_reason="timeout")
+
+    sleep_seconds = decision.delay_seconds if remaining is None else min(decision.delay_seconds, remaining)
+    _notify_progress(
+        options.progress_callback,
+        "retrying",
+        state,
+        error=redacted_error,
+        retry_attempt=decision.attempt,
+        delay_seconds=decision.delay_seconds,
+        next_retry_at=decision.next_retry_at,
+    )
+    try:
+        options.retry_sleep(sleep_seconds)
+    except Exception:
+        return _RetryOutcome(retried=False, terminal_error="retry sleep failed")
+
+    if remaining is not None and decision.delay_seconds > remaining:
+        return _RetryOutcome(retried=False, terminal_reason="timeout")
+    return _RetryOutcome(retried=True)
+
+
+def _is_retryable_source_error(exc: Exception, options: MonitorOptions) -> bool:
+    if not isinstance(exc, MonitorSourceError):
+        return False
+    if exc.phase not in {"setup", "iteration"}:
+        return False
+    if exc.stream_type in _RETRYABLE_STREAM_TYPES:
+        return True
+    if exc.stream_type is StreamType.MPEGTS:
+        return urlparse(str(options.source_url)).scheme.lower() in {"http", "https"}
+    return False
+
+
+def _source_error_message(exc: Exception, *, fallback: str) -> str:
+    if isinstance(exc, MonitorSourceError):
+        message = _redact_monitor_error(str(exc))
+        return message or fallback
+    return fallback
+
+
+def _redact_monitor_error(message: str) -> str:
+    return _PAYLOAD_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[redacted]", redact_source_label(message))
 
 
 def _matches_filter(marker: AdMarker, marker_filter: str) -> bool:
@@ -322,6 +472,9 @@ def _notify_progress(
     *,
     reason: MonitorReason | None = None,
     error: str | None = None,
+    retry_attempt: int | None = None,
+    delay_seconds: float | None = None,
+    next_retry_at: datetime | None = None,
 ) -> None:
     if progress_callback is None:
         return
@@ -330,7 +483,10 @@ def _notify_progress(
             MonitorProgress(
                 phase=phase,
                 reason=reason,
-                error=error,
+                error=redact_source_label(error) if error is not None else None,
+                retry_attempt=retry_attempt,
+                delay_seconds=delay_seconds,
+                next_retry_at=next_retry_at,
                 counters={
                     "markers_seen": state.markers_seen,
                     "markers_emitted": state.markers_emitted,

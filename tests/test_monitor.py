@@ -3,12 +3,15 @@ from __future__ import annotations
 import io
 import json
 import sqlite3
+from datetime import datetime, timezone
 from pathlib import Path
 
 import pytest
 
 from tidemark.markers import AD_END, AD_START, UNKNOWN, AdMarker
 from tidemark.monitor import MonitorOptions, MonitorResult, run_monitor
+from tidemark.monitor_sources import MonitorSourceError, StreamType
+from tidemark.runtime.retry import RetryPolicy
 from tidemark.store import migrate
 
 
@@ -83,6 +86,202 @@ def test_run_monitor_progress_callback_observes_running_counters_and_eof_termina
         ("running", None, {"markers_seen": 2, "markers_emitted": 1, "markers_filtered": 1, "sink_warnings": 0}, None),
         ("completed", "eof", {"markers_seen": 2, "markers_emitted": 1, "markers_filtered": 1, "sink_warnings": 0}, None),
     ]
+
+
+def test_run_monitor_retries_transient_setup_failure_and_keeps_stdout_marker_only() -> None:
+    attempts = 0
+    sleeps: list[float] = []
+    events: list[object] = []
+    first = marker(tag="#EXT-X-CUE-OUT")
+
+    def source_factory():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise MonitorSourceError(
+                "hls source setup failed token=secret https://media.example/live.m3u8?token=secret",
+                stream_type=StreamType.HLS,
+                phase="setup",
+            )
+        return iter([first])
+
+    result, stdout, stderr = run_with(
+        source_factory,
+        MonitorOptions(
+            source_url="https://media.example/live.m3u8?token=secret",
+            retry_policy=RetryPolicy(max_attempts=1, initial_backoff_seconds=0.25, max_backoff_seconds=1.0),
+            retry_sleep=sleeps.append,
+            progress_callback=events.append,
+            clock=lambda: 0.0,
+        ),
+    )
+
+    assert result == MonitorResult(reason="eof", markers_seen=1, markers_emitted=1, markers_filtered=0)
+    assert attempts == 2
+    assert sleeps == [0.25]
+    assert stdout.getvalue().splitlines() == [first.to_json()]
+    assert "tidemark" not in stdout.getvalue()
+    assert "token=secret" not in stderr.getvalue()
+    retry_events = [event for event in events if event.phase == "retrying"]
+    assert len(retry_events) == 1
+    assert retry_events[0].retry_attempt == 1
+    assert retry_events[0].delay_seconds == 0.25
+    assert retry_events[0].next_retry_at == datetime.fromtimestamp(0.25, timezone.utc)
+    assert retry_events[0].error == "hls source setup failed token=[redacted] media.example/live.m3u8"
+    assert retry_events[0].counters == {
+        "markers_seen": 0,
+        "markers_emitted": 0,
+        "markers_filtered": 0,
+        "sink_warnings": 0,
+    }
+
+
+def test_run_monitor_retries_transient_iterator_failure_and_preserves_counters() -> None:
+    attempts = 0
+    sleeps: list[float] = []
+    events: list[object] = []
+    emitted = marker(tag="#EXT-X-CUE-OUT", timestamp=1.0)
+    filtered = marker(marker_type="OTHER", tag=None, timestamp=2.0)
+    recovered = marker(tag="#EXT-X-CUE-IN", timestamp=3.0)
+
+    def source_factory():
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            yield emitted
+            yield filtered
+            raise MonitorSourceError(
+                "hls source iteration failed https://media.example/live.m3u8?token=secret",
+                stream_type=StreamType.HLS,
+                phase="iteration",
+            )
+        yield recovered
+
+    result, stdout, _stderr = run_with(
+        source_factory,
+        MonitorOptions(
+            source_url="https://media.example/live.m3u8?token=secret",
+            marker_filter="ad",
+            retry_policy=RetryPolicy(max_attempts=1, initial_backoff_seconds=0.0, max_backoff_seconds=1.0),
+            retry_sleep=sleeps.append,
+            progress_callback=events.append,
+            clock=lambda: 0.0,
+        ),
+    )
+
+    assert result == MonitorResult(reason="eof", markers_seen=3, markers_emitted=2, markers_filtered=1)
+    assert attempts == 2
+    assert sleeps == [0.0]
+    assert stdout.getvalue().splitlines() == [emitted.to_json(), recovered.to_json()]
+    retry_event = next(event for event in events if event.phase == "retrying")
+    assert retry_event.counters == {
+        "markers_seen": 2,
+        "markers_emitted": 1,
+        "markers_filtered": 1,
+        "sink_warnings": 0,
+    }
+
+
+def test_run_monitor_exhausts_transient_retries_with_redacted_error_snapshot() -> None:
+    attempts = 0
+    events: list[object] = []
+
+    def source_factory():
+        nonlocal attempts
+        attempts += 1
+        raise MonitorSourceError(
+            "icy source setup failed https://media.example/live?token=secret raw_base64=abc",
+            stream_type=StreamType.ICY,
+            phase="setup",
+        )
+
+    result, stdout, stderr = run_with(
+        source_factory,
+        MonitorOptions(
+            source_url="https://media.example/live?token=secret",
+            retry_policy=RetryPolicy(max_attempts=1, initial_backoff_seconds=0.0, max_backoff_seconds=1.0),
+            retry_sleep=lambda delay: None,
+            progress_callback=events.append,
+            clock=lambda: 0.0,
+        ),
+    )
+
+    assert result.reason == "error"
+    assert result.error == "icy source setup failed media.example/live raw_base64=[redacted]"
+    assert attempts == 2
+    assert stdout.getvalue() == ""
+    assert "icy source setup failed" in stderr.getvalue()
+    assert "token=secret" not in stderr.getvalue()
+    assert "raw_base64=abc" not in stderr.getvalue()
+    assert [event.phase for event in events].count("retrying") == 1
+    terminal = events[-1]
+    assert terminal.phase == "error"
+    assert terminal.reason == "error"
+    assert terminal.error == "icy source setup failed media.example/live raw_base64=[redacted]"
+
+
+def test_run_monitor_does_not_retry_deterministic_monitor_errors() -> None:
+    retry_policy = RetryPolicy(max_attempts=3, initial_backoff_seconds=0.0, max_backoff_seconds=1.0)
+    sleeps: list[float] = []
+
+    invalid_filter, invalid_stdout, _ = run_with([marker()], MonitorOptions(marker_filter="bogus", retry_policy=retry_policy, retry_sleep=sleeps.append))
+    non_marker, non_marker_stdout, _ = run_with([object()], MonitorOptions(retry_policy=retry_policy, retry_sleep=sleeps.append))
+
+    class BrokenMarker(AdMarker):
+        def to_json(self) -> str:
+            raise TypeError("bad marker token=secret")
+
+    broken_marker = BrokenMarker(type="ID3", classification=UNKNOWN, source="fixture", tag=None, timestamp=1.0)
+    serialization, serialization_stdout, _ = run_with([broken_marker], MonitorOptions(retry_policy=retry_policy, retry_sleep=sleeps.append))
+
+    assert invalid_filter.error == "invalid marker filter"
+    assert invalid_stdout.getvalue() == ""
+    assert non_marker.error == "marker source yielded non-AdMarker value"
+    assert non_marker_stdout.getvalue() == ""
+    assert serialization.error == "marker serialization failed"
+    assert serialization_stdout.getvalue() == ""
+    assert sleeps == []
+
+
+def test_run_monitor_retry_disabled_preserves_iterator_failure_behavior() -> None:
+    attempts = 0
+
+    def source_factory():
+        nonlocal attempts
+        attempts += 1
+        raise MonitorSourceError("hls source setup failed", stream_type=StreamType.HLS, phase="setup")
+
+    result, stdout, stderr = run_with(source_factory, MonitorOptions(retry_policy=RetryPolicy(max_attempts=0)))
+
+    assert result.reason == "error"
+    assert result.error == "hls source setup failed"
+    assert attempts == 1
+    assert stdout.getvalue() == ""
+    assert "hls source setup failed" in stderr.getvalue()
+
+
+def test_run_monitor_timeout_bounds_retry_sleep() -> None:
+    times = iter([0.0, 0.0, 1.0])
+    sleeps: list[float] = []
+
+    def source_factory():
+        raise MonitorSourceError("hls source setup failed", stream_type=StreamType.HLS, phase="setup")
+
+    result, stdout, stderr = run_with(
+        source_factory,
+        MonitorOptions(
+            retry_policy=RetryPolicy(max_attempts=3, initial_backoff_seconds=2.0, max_backoff_seconds=10.0),
+            retry_sleep=sleeps.append,
+            timeout=1.0,
+            clock=lambda: next(times),
+        ),
+    )
+
+    assert result.reason == "timeout"
+    assert result.error is None
+    assert sleeps == [1.0]
+    assert stdout.getvalue() == ""
+    assert "reason=timeout" in stderr.getvalue()
 
 
 def test_run_monitor_progress_callback_failures_do_not_change_output_or_result() -> None:
