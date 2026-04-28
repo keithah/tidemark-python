@@ -11,6 +11,7 @@ from tidemark.cli.cmd_ingest import ingest
 from tidemark.cli.cmd_monitor import monitor
 from tidemark.cli.cmd_report import report
 from tidemark.cli.cmd_search import search
+from tidemark.cli.cmd_status import status
 
 
 class RootAliasGroup(TyperGroup):
@@ -46,6 +47,7 @@ def root() -> None:
 
 app.command(name="ingest")(ingest)
 app.command(name="monitor")(monitor)
+app.command(name="status")(status)
 app.add_typer(report, name="report")
 app.command(name="search")(search)
 app.command(name="clip")(clip)

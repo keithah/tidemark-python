@@ -152,6 +152,16 @@ def test_root_alias_does_not_run_when_monitor_subcommand_is_selected(monkeypatch
     assert [call.get("source") for call in calls if "source" in call] == ["fixture.ts"]
 
 
+def test_status_is_real_command_not_monitor_alias(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls = patch_success(monkeypatch)
+
+    result = invoke(["status", "--runtime-dir", str(tmp_path / "missing-runtime")])
+
+    assert result.exit_code == 0, result.output
+    assert "No runtime health records found" in result.stdout
+    assert calls == []
+
+
 @pytest.mark.parametrize("args", [["--help"], ["monitor", "--help"]])
 def test_help_paths_do_not_invoke_monitor(monkeypatch: pytest.MonkeyPatch, args: list[str]) -> None:
     calls = patch_success(monkeypatch)

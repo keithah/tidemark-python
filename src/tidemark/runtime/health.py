@@ -199,11 +199,11 @@ class HealthRecord:
     def from_json_dict(cls, payload: object) -> "HealthRecord":
         if not isinstance(payload, dict):
             raise ValueError("status file root must be an object")
+        if payload.get("schema_version") != SCHEMA_VERSION:
+            raise ValueError("schema version is unsupported")
         missing = sorted(_REQUIRED_FIELDS - payload.keys())
         if missing:
             raise ValueError(f"missing required field: {missing[0]}")
-        if payload.get("schema_version") != SCHEMA_VERSION:
-            raise ValueError("schema version is unsupported")
 
         counters = payload.get("counters")
         if not isinstance(counters, dict):
@@ -500,6 +500,65 @@ def pid_exists(pid: int) -> bool:
     return True
 
 
+def format_status_report(
+    entries: list[StatusEntry],
+    diagnostics: list[ReadDiagnostic],
+    *,
+    runtime_dir: Path,
+) -> str:
+    """Return a compact, redacted status report for CLI and agent inspection."""
+    lines = [f"Runtime directory: {redact_path(Path(runtime_dir))}"]
+    if not entries:
+        lines.append("No runtime health records found; tidemark is not running.")
+    else:
+        lines.append(f"Runs: {len(entries)}")
+        for entry in entries:
+            lines.append(_format_status_entry(entry))
+
+    entry_diagnostics = [diagnostic for entry in entries for diagnostic in entry.diagnostics]
+    all_diagnostics = [*diagnostics, *entry_diagnostics]
+    if all_diagnostics:
+        lines.append(f"Diagnostics: {len(all_diagnostics)} malformed status file(s) skipped")
+        for diagnostic in all_diagnostics:
+            lines.append(f"- {diagnostic.file_name}: {diagnostic.message}")
+    return "\n".join(lines)
+
+
+def _format_status_entry(entry: StatusEntry) -> str:
+    record = entry.record
+    fields = [
+        f"run_id={record.run_id}",
+        f"command={record.command}",
+        f"pid={record.pid}",
+        f"phase={record.phase}",
+        f"state={entry.status}",
+        f"heartbeat_age={int(entry.heartbeat_age_seconds)}s",
+        f"source={record.source_label}",
+        f"counters={_format_counters(record.counters)}",
+        f"retry={_format_retry(record.retry)}",
+    ]
+    if record.last_error:
+        fields.append(f"last_error={record.last_error}")
+    if record.terminal:
+        fields.append(f"terminal={record.terminal_reason or 'finished'}")
+    return "- " + " ".join(fields)
+
+
+def _format_counters(counters: dict[str, int | float]) -> str:
+    if not counters:
+        return "none"
+    return ",".join(f"{key}={counters[key]:g}" for key in sorted(counters))
+
+
+def _format_retry(retry: RetryState) -> str:
+    parts = [f"attempt={retry.attempt}"]
+    if retry.next_retry_at is not None:
+        parts.append(f"next={_format_timestamp(retry.next_retry_at)}")
+    if retry.last_retry_error:
+        parts.append(f"last_error={retry.last_retry_error}")
+    return ",".join(parts)
+
+
 def _merge_counters(
     current: dict[str, int | float],
     updates: dict[str, int | float] | None,
@@ -527,6 +586,7 @@ __all__ = [
     "WriteResult",
     "classify_record",
     "create_reporter",
+    "format_status_report",
     "make_run_id",
     "pid_exists",
     "read_status_entries",
