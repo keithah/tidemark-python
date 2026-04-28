@@ -76,13 +76,13 @@ def _default_backend(sequence: int) -> FingerprintBackend:
         raise _error("dependency", sequence=sequence, detail="acoustid unavailable") from exc
 
     def _fingerprint(sample_rate: int, channels: int, pcmiter: Iterable[bytes]) -> object:
-        return acoustid.fingerprint(sample_rate, channels, pcmiter)
+        return acoustid.fingerprint(sample_rate, channels, iter(pcmiter))
 
     return _fingerprint
 
 
 def _normalize_backend_result(raw_result: object, *, sequence: int) -> str:
-    if isinstance(raw_result, str):
+    if isinstance(raw_result, (str, bytes)):
         return _validate_fingerprint(raw_result, sequence=sequence)
 
     if isinstance(raw_result, tuple) and len(raw_result) == 2:
@@ -97,6 +97,11 @@ def _normalize_backend_result(raw_result: object, *, sequence: int) -> str:
 
 
 def _validate_fingerprint(value: object, *, sequence: int) -> str:
+    if isinstance(value, bytes):
+        try:
+            value = value.decode("ascii")
+        except UnicodeDecodeError as exc:
+            raise _error("backend", sequence=sequence, detail="malformed fingerprint field") from exc
     if not isinstance(value, str) or value == "":
         raise _error("backend", sequence=sequence, detail="malformed fingerprint field")
     return value

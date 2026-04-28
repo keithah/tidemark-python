@@ -165,7 +165,17 @@ def test_fingerprint_audio_chunk_rejects_invalid_chunks_before_backend_without_l
     assert "\x00" not in message
 
 
-@pytest.mark.parametrize("response", ["", (1.0, ""), ("fingerprint", 1.0), (1.0,), (1.0, "fp", "extra"), object()])
+def test_fingerprint_audio_chunk_accepts_pyacoustid_byte_fingerprint() -> None:
+    def backend(sample_rate: int, channels: int, pcmiter: Iterable[bytes]) -> bytes:
+        assert tuple(pcmiter) == (_chunk().pcm_bytes,)
+        return b"AQAAAA"
+
+    result = fingerprint_audio_chunk(_chunk(), backend=backend)
+
+    assert result.fingerprint == "AQAAAA"
+
+
+@pytest.mark.parametrize("response", [b"", b"\xff", "", (1.0, ""), ("fingerprint", 1.0), (1.0,), (1.0, "fp", "extra"), object()])
 def test_fingerprint_audio_chunk_rejects_malformed_backend_returns_without_values(response: object) -> None:
     with pytest.raises(FingerprintError) as excinfo:
         fingerprint_audio_chunk(_chunk(), backend=lambda *_args: response)
