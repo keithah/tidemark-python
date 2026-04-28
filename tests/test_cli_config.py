@@ -32,7 +32,8 @@ def patch_monitor(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
         return iter(())
 
     def fake_run_monitor(marker_source, *, options: MonitorOptions, stdout, stderr):
-        calls.append({"marker_source": marker_source, "options": options})
+        source_iter = marker_source() if callable(marker_source) else marker_source
+        calls.append({"marker_source": source_iter, "options": options})
         return MonitorResult(reason="eof", markers_seen=0, markers_emitted=0, markers_filtered=0)
 
     monkeypatch.setattr("tidemark.cli.cmd_monitor.monitor_source", fake_monitor_source)

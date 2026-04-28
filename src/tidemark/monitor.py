@@ -48,6 +48,7 @@ _MARKER_TYPE_FILTERS = {"scte35", "id3", "icy"}
 _VALID_FILTERS = {"all", "ad", AD_START, AD_END, UNKNOWN, *_MARKER_TYPE_FILTERS}
 _RETRYABLE_STREAM_TYPES = {StreamType.HLS, StreamType.ICY, StreamType.UDP}
 _PAYLOAD_ASSIGNMENT_RE = re.compile(r"(?i)\b(raw[_-]?base64|payload)\s*[=:]\s*[^\s&]+")
+_EMBEDDED_PATH_RE = re.compile(r"(?<![A-Za-z0-9+.-])(?:~|/|\.\.?/)[^\s]+")
 
 
 @dataclass(frozen=True)
@@ -413,7 +414,8 @@ def _source_error_message(exc: Exception, *, fallback: str) -> str:
 
 
 def _redact_monitor_error(message: str) -> str:
-    return _PAYLOAD_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[redacted]", redact_source_label(message))
+    redacted = _PAYLOAD_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[redacted]", redact_source_label(message))
+    return _EMBEDDED_PATH_RE.sub(lambda match: Path(match.group(0)).name or "[redacted-path]", redacted)
 
 
 def _matches_filter(marker: AdMarker, marker_filter: str) -> bool:

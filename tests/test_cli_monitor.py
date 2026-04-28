@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import json
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
+from tidemark.markers import UNKNOWN, AdMarker
 from tidemark.monitor import MonitorOptions, MonitorResult
+from tidemark.monitor_sources import MonitorSourceError, StreamType
 
 
 runner = CliRunner()
@@ -15,6 +18,36 @@ def invoke(args: list[str]):
     from tidemark.cli.main import app
 
     return runner.invoke(app, args)
+
+
+def marker(
+    marker_type: str = "HLS",
+    *,
+    tag: str | None = "#EXT-X-CUE-OUT",
+    source: str = "fixture?token=secret",
+    classification: str = UNKNOWN,
+    timestamp: float = 1.0,
+    fields: dict[str, object] | None = None,
+) -> AdMarker:
+    return AdMarker(
+        type=marker_type,
+        classification=classification,
+        source=source,
+        tag=tag,
+        timestamp=timestamp,
+        fields=fields or {},
+        raw_base64="secret-payload",
+    )
+
+
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    return [json.loads(line) for line in path.read_text(encoding="utf-8").splitlines()]
+
+
+def only_run_file(runtime_dir: Path) -> dict[str, object]:
+    run_files = sorted((runtime_dir / "runs").glob("*.json"))
+    assert len(run_files) == 1
+    return json.loads(run_files[0].read_text(encoding="utf-8"))
 
 
 def patch_success(monkeypatch: pytest.MonkeyPatch, *, stdout_line: str | None = None):
@@ -32,9 +65,10 @@ def patch_success(monkeypatch: pytest.MonkeyPatch, *, stdout_line: str | None = 
         return iter(())
 
     def fake_run_monitor(marker_source, *, options: MonitorOptions, stdout, stderr):
+        source_iter = marker_source() if callable(marker_source) else marker_source
         calls.append(
             {
-                "marker_source": marker_source,
+                "marker_source": source_iter,
                 "options": options,
             }
         )
@@ -71,6 +105,150 @@ def test_monitor_command_invokes_library_once_with_default_options(monkeypatch: 
     assert options.db_path is None
     assert options.timeout is None
     assert options.emit_summary is True
+    assert options.retry_policy is not None
+    assert options.retry_policy.max_attempts == 0
+
+
+def test_monitor_command_retries_transient_setup_and_records_lifecycle_status(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attempts = 0
+    emitted = marker()
+    runtime_dir = tmp_path / "runtime"
+    log_file = tmp_path / "lifecycle.jsonl"
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[paths]",
+                f'runtime_dir = "{runtime_dir}"',
+                f'log_file = "{log_file}"',
+                "[monitor]",
+                "retry_attempts = 1",
+                "retry_initial_backoff_seconds = 0.0",
+                "retry_max_backoff_seconds = 1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def flaky_source(source, *, stream_type="auto", timeout=None, **kwargs):  # noqa: ARG001
+        nonlocal attempts
+        attempts += 1
+        if attempts == 1:
+            raise MonitorSourceError(
+                "hls source setup failed https://example.test/live.m3u8?token=secret local=/home/keith/private.ts",
+                stream_type=StreamType.HLS,
+                phase="setup",
+            )
+        return iter([emitted])
+
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.monitor_source", flaky_source)
+
+    result = invoke(["monitor", "https://example.test/live.m3u8?token=secret", "--config", str(config_path), "--quiet"])
+
+    assert result.exit_code == 0, result.output
+    assert attempts == 2
+    assert result.stdout.splitlines() == [emitted.to_json()]
+    assert result.stderr == ""
+    status = only_run_file(runtime_dir)
+    assert status["phase"] == "completed"
+    assert status["terminal"] is True
+    assert status["terminal_reason"] == "eof"
+    assert status["retry"]["attempt"] == 1
+    assert status["retry"]["last_retry_error"] == "hls source setup failed example.test/live.m3u8 local=private.ts"
+    assert "token=secret" not in json.dumps(status)
+    events = read_jsonl(log_file)
+    assert [event["event"] for event in events] == ["monitor.start", "monitor.retry", "monitor.reconnect", "monitor.terminal"]
+    assert events[1]["retry_attempt"] == 1
+    assert events[1]["error"] == "hls source setup failed example.test/live.m3u8 local=private.ts"
+    assert events[-1]["terminal_reason"] == "eof"
+    assert "token=secret" not in log_file.read_text(encoding="utf-8")
+    assert "/home/keith" not in log_file.read_text(encoding="utf-8")
+
+
+def test_monitor_command_exhausted_retry_records_redacted_status_log_and_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attempts = 0
+    runtime_dir = tmp_path / "runtime"
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text(
+        "\n".join(
+            [
+                "[paths]",
+                f'runtime_dir = "{runtime_dir}"',
+                "[monitor]",
+                "retry_attempts = 1",
+                "retry_initial_backoff_seconds = 0.0",
+                "retry_max_backoff_seconds = 1.0",
+            ]
+        ),
+        encoding="utf-8",
+    )
+
+    def failing_source(source, *, stream_type="auto", timeout=None, **kwargs):  # noqa: ARG001
+        nonlocal attempts
+        attempts += 1
+        raise MonitorSourceError(
+            "icy source setup failed https://example.test/live?token=secret file=/Users/alice/private/live.ts",
+            stream_type=StreamType.ICY,
+            phase="setup",
+        )
+
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.monitor_source", failing_source)
+
+    result = invoke(["monitor", "https://example.test/live?token=secret", "--config", str(config_path)])
+
+    assert result.exit_code == 1
+    assert attempts == 2
+    assert result.stdout == ""
+    assert "[tidemark] error:" in result.stderr
+    assert "token=secret" not in result.stderr
+    assert "/Users/alice" not in result.stderr
+    status_result = invoke(["status", "--runtime-dir", str(runtime_dir)])
+    assert status_result.exit_code == 0, status_result.output
+    assert "retry=attempt=1,next=" in status_result.stdout
+    assert "last_error=icy source setup failed example.test/live file=live.ts" in status_result.stdout
+    assert "terminal=error" in status_result.stdout
+    assert "token=secret" not in status_result.stdout
+    assert "/Users/alice" not in status_result.stdout
+    log_file = runtime_dir / "logs" / "tidemark.jsonl"
+    log_text = log_file.read_text(encoding="utf-8")
+    assert "monitor.retry" in log_text
+    assert "monitor.terminal" in log_text
+    assert "token=secret" not in log_text
+    assert "/Users/alice" not in log_text
+
+
+def test_monitor_command_retry_disabled_by_default_and_env_log_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    attempts = 0
+    runtime_dir = tmp_path / "runtime"
+    env_log_file = tmp_path / "env-log.jsonl"
+    config_path = tmp_path / "tidemark.toml"
+    config_path.write_text(f'[paths]\nruntime_dir = "{runtime_dir}"\n', encoding="utf-8")
+
+    def failing_source(source, *, stream_type="auto", timeout=None, **kwargs):  # noqa: ARG001
+        nonlocal attempts
+        attempts += 1
+        raise MonitorSourceError("hls source setup failed token=secret", stream_type=StreamType.HLS, phase="setup")
+
+    monkeypatch.setattr("tidemark.cli.cmd_monitor.monitor_source", failing_source)
+
+    result = runner.invoke(
+        __import__("tidemark.cli.main", fromlist=["app"]).app,
+        ["monitor", "https://example.test/live?token=secret", "--config", str(config_path), "--quiet"],
+        env={"TIDEMARK_LOG_FILE": str(env_log_file)},
+    )
+
+    assert result.exit_code == 1
+    assert attempts == 1
+    assert result.stdout == ""
+    assert result.stderr == "[tidemark] error: hls source setup failed token=[redacted]\n"
+    assert env_log_file.exists()
+    assert not (runtime_dir / "logs" / "tidemark.jsonl").exists()
 
 
 class RecordingReporter:
@@ -135,7 +313,7 @@ def test_monitor_command_creates_reporter_before_source_and_passes_progress_call
     assert result.exit_code == 0, result.output
     assert result.stdout == ""
     assert result.stderr == ""
-    assert calls == ["create_reporter", "monitor_source", "run_monitor"]
+    assert calls == ["create_reporter", "run_monitor"]
     assert events == [
         ("start", {"phase": "setup", "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}}),
         ("update", {"phase": "running", "counters": {"markers_seen": 1, "markers_emitted": 1, "markers_filtered": 0, "sink_warnings": 0}}),
@@ -167,12 +345,13 @@ def test_monitor_command_records_source_setup_failure_without_leaking_or_changin
     assert "token=secret" not in result.stderr
     assert events == [
         ("start", {"phase": "setup", "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}}),
+        ("update", {"phase": "running", "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}}),
         (
             "fail",
             {
-                "error": "source setup failed: http://example.test/live.m3u8?token=secret",
+                "error": "source setup failed: example.test/live.m3u8",
                 "phase": "error",
-                "reason": "source_setup_error",
+                "reason": "error",
                 "counters": {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0},
             },
         ),

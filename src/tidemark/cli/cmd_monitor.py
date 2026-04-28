@@ -15,8 +15,10 @@ from tidemark.config import ConfigError, MonitorOverrides, default_runtime_dir, 
 from tidemark.monitor import MonitorOptions as RuntimeMonitorOptions
 from tidemark.monitor import MonitorProgress
 from tidemark.monitor import run_monitor
-from tidemark.monitor_sources import MonitorSourceError, monitor_source
+from tidemark.monitor_sources import monitor_source
 from tidemark.runtime.health import HealthReporter, create_reporter, redact_source_label
+from tidemark.runtime.logging import LifecycleLogger, resolve_lifecycle_log_path
+from tidemark.runtime.retry import RetryPolicy
 
 
 class CliStreamType(str, Enum):
@@ -106,20 +108,19 @@ def run_monitor_command(
 
         runtime_dir = Path(config.paths.runtime_dir or default_runtime_dir()).expanduser()
         reporter = create_reporter(runtime_dir, command="monitor", source=url)
+        logger = LifecycleLogger(resolve_lifecycle_log_path(config))
         _report_start(reporter)
+        _log_lifecycle(logger, reporter, event="monitor.start", source=url, phase="setup", counters=_empty_counters())
 
-        try:
-            marker_source = monitor_source(
+        def marker_source_factory():
+            return monitor_source(
                 url,
                 stream_type=resolved.stream_type,
                 timeout=resolved.timeout_seconds,
             )
-        except MonitorSourceError as exc:
-            _report_fail(reporter, str(exc), phase="error", reason="source_setup_error", counters=_empty_counters())
-            _fatal(redact_source_label(str(exc)))
 
         result = run_monitor(
-            marker_source,
+            marker_source_factory,
             options=RuntimeMonitorOptions(
                 source_url=url,
                 marker_filter=None if marker_filter is None else marker_filter.value,
@@ -127,14 +128,21 @@ def run_monitor_command(
                 db_path=resolved_db_path,
                 timeout=resolved.timeout_seconds,
                 emit_summary=not quiet,
-                progress_callback=_monitor_progress_callback(reporter),
+                progress_callback=_monitor_progress_callback(reporter, logger, source=url),
+                retry_policy=RetryPolicy(
+                    max_attempts=resolved.retry_attempts,
+                    initial_backoff_seconds=resolved.retry_initial_backoff_seconds,
+                    max_backoff_seconds=resolved.retry_max_backoff_seconds,
+                ),
             ),
             stdout=sys.stdout,
             stderr=sys.stderr,
         )
-        _report_result(reporter, result)
+        _report_result(reporter, logger, result, source=url)
     except ConfigError as exc:
         _fatal(str(exc))
+    except typer.Exit:
+        raise
     except Exception:
         _fatal("monitor failed")
 
@@ -171,25 +179,41 @@ def _empty_counters() -> dict[str, int]:
     return {"markers_seen": 0, "markers_emitted": 0, "markers_filtered": 0, "sink_warnings": 0}
 
 
-def _monitor_progress_callback(reporter: HealthReporter):
+def _monitor_progress_callback(reporter: HealthReporter, logger: LifecycleLogger, *, source: str):
+    retry_seen = False
+
     def record(progress: MonitorProgress) -> None:
+        nonlocal retry_seen
+        counters = _progress_counters(progress)
         if progress.phase == "running":
-            _report_update(reporter, phase="running", counters=progress.counters)
+            _report_update(reporter, phase="running", counters=counters)
+            if retry_seen:
+                retry_seen = False
+                _log_lifecycle(logger, reporter, event="monitor.reconnect", source=source, phase="running", counters=counters)
+        elif progress.phase == "retrying":
+            retry_seen = True
+            _report_retry(
+                reporter,
+                attempt=getattr(progress, "retry_attempt", None) or 0,
+                next_retry_at=getattr(progress, "next_retry_at", None),
+                error=getattr(progress, "error", None) or "monitor retry",
+                counters=counters,
+            )
+            _log_lifecycle(
+                logger,
+                reporter,
+                event="monitor.retry",
+                source=source,
+                phase="retrying",
+                counters=counters,
+                retry_attempt=getattr(progress, "retry_attempt", None),
+                next_retry_at=getattr(progress, "next_retry_at", None),
+                error=getattr(progress, "error", None),
+            )
         elif progress.phase == "error":
-            _report_fail(
-                reporter,
-                progress.error or progress.reason or "monitor error",
-                phase="error",
-                reason=progress.reason or "error",
-                counters=progress.counters,
-            )
+            return
         else:
-            _report_finish(
-                reporter,
-                phase="completed",
-                reason=progress.reason or "finished",
-                counters=progress.counters,
-            )
+            return
 
     return record
 
@@ -204,6 +228,20 @@ def _report_start(reporter: HealthReporter) -> None:
 def _report_update(reporter: HealthReporter, *, phase: str, counters: dict[str, int]) -> None:
     try:
         reporter.update(phase=phase, counters=counters)
+    except Exception:
+        pass
+
+
+def _report_retry(
+    reporter: HealthReporter,
+    *,
+    attempt: int,
+    next_retry_at: object,
+    error: object,
+    counters: dict[str, int],
+) -> None:
+    try:
+        reporter.retry(attempt=attempt, next_retry_at=next_retry_at, error=error, counters=counters)  # type: ignore[arg-type]
     except Exception:
         pass
 
@@ -231,12 +269,79 @@ def _result_counters(result) -> dict[str, int]:
     }
 
 
-def _report_result(reporter: HealthReporter, result) -> None:
+def _report_result(reporter: HealthReporter, logger: LifecycleLogger, result, *, source: str) -> None:
     counters = _result_counters(result)
     if result.reason == "error":
         _report_fail(reporter, result.error or "monitor error", phase="error", reason="error", counters=counters)
+        _log_lifecycle(
+            logger,
+            reporter,
+            event="monitor.terminal",
+            source=source,
+            phase="error",
+            counters=counters,
+            error=result.error or "monitor error",
+            terminal_reason="error",
+        )
     else:
         _report_finish(reporter, phase="completed", reason=result.reason, counters=counters)
+        _log_lifecycle(
+            logger,
+            reporter,
+            event="monitor.terminal",
+            source=source,
+            phase="completed",
+            counters=counters,
+            terminal_reason=result.reason,
+        )
+
+
+def _progress_counters(progress: MonitorProgress) -> dict[str, int]:
+    counters = getattr(progress, "counters", None)
+    if not isinstance(counters, dict):
+        return _empty_counters()
+    merged = _empty_counters()
+    for key in merged:
+        value = counters.get(key)
+        if isinstance(value, int) and not isinstance(value, bool):
+            merged[key] = value
+    return merged
+
+
+def _reporter_run_id(reporter: HealthReporter) -> str:
+    record = getattr(reporter, "record", None)
+    run_id = getattr(record, "run_id", None)
+    return str(run_id) if run_id else "unknown"
+
+
+def _log_lifecycle(
+    logger: LifecycleLogger,
+    reporter: HealthReporter,
+    *,
+    event: str,
+    source: str,
+    phase: str,
+    counters: dict[str, int] | None = None,
+    retry_attempt: int | None = None,
+    next_retry_at: object | None = None,
+    error: object | None = None,
+    terminal_reason: object | None = None,
+) -> None:
+    try:
+        logger.write(
+            event=event,
+            command="monitor",
+            run_id=_reporter_run_id(reporter),
+            source_label=source,
+            phase=phase,
+            counters=counters,
+            retry_attempt=retry_attempt,
+            next_retry_at=next_retry_at,  # type: ignore[arg-type]
+            error=error,
+            terminal_reason=terminal_reason,
+        )
+    except Exception:
+        pass
 
 
 def _config_declares_paths_db(config_path: Path | None) -> bool:
