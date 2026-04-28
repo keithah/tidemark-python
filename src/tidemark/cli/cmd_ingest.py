@@ -180,17 +180,25 @@ def _empty_counters() -> dict[str, int]:
 
 
 def _result_counters(result: IngestPipelineResult) -> dict[str, int]:
+    processed = _field_count(result, "segment_ids")
+    skipped = _field_count(result, "skipped_segment_ids")
+    failed = _field_count(result, "issues")
     return {
-        "segments": len(result.segment_ids) + len(result.skipped_segment_ids),
-        "processed": len(result.segment_ids),
-        "skipped": len(result.skipped_segment_ids),
-        "failed": len(result.issues),
-        "words": len(result.transcript_word_ids),
-        "markers": len(result.ad_event_ids),
-        "issues": len(result.issues),
-        "retained": len(result.retained_audio_ids),
-        "songs": len(result.song_ids),
+        "segments": processed + skipped,
+        "processed": processed,
+        "skipped": skipped,
+        "failed": failed,
+        "words": _field_count(result, "transcript_word_ids"),
+        "markers": _field_count(result, "ad_event_ids"),
+        "issues": failed,
+        "retained": _field_count(result, "retained_audio_ids"),
+        "songs": _field_count(result, "song_ids"),
     }
+
+
+def _field_count(result: object, field_name: str) -> int:
+    value = getattr(result, field_name, ())
+    return len(value) if value is not None else 0
 
 
 def _create_ingest_reporter(runtime_dir: Path, *, source: object) -> HealthReporter | None:

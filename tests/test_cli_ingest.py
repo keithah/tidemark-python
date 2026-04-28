@@ -235,6 +235,61 @@ def test_ingest_command_creates_reporter_and_records_progress_and_final_counts(
     ]
 
 
+def test_ingest_result_missing_optional_restart_fields_defaults_to_zero(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = write_manifest(tmp_path / "playlist.m3u8")
+    transcript = write_transcript(tmp_path / "transcript.json")
+    calls: list[IngestCall] = []
+
+    class LegacyResultStub:
+        segment_ids = (11,)
+        transcript_word_ids = (101,)
+        ad_event_ids = ()
+        issues = ()
+
+    def fake_ingest_source_to_db(
+        source,
+        *,
+        db_path,
+        transcriber,
+        source_url: str | None = None,
+        include_manifest_markers: bool = True,
+        fingerprint: bool = False,
+        acoustid_api_key: str | None = None,
+        lookup_timeout_seconds: float | None = None,
+        retention_dir: str | Path | None = None,
+        **kwargs,
+    ):
+        calls.append(
+            IngestCall(
+                source=Path(source),
+                db_path=Path(db_path),
+                transcriber_is_none=transcriber is None,
+                fixture_words=tuple(transcriber.fixture_words) if transcriber is not None else (),
+                language=transcriber.language if transcriber is not None else None,
+                engine=transcriber.engine if transcriber is not None else None,
+                source_url=source_url,
+                include_manifest_markers=include_manifest_markers,
+                fingerprint=fingerprint,
+                acoustid_api_key=acoustid_api_key,
+                lookup_timeout_seconds=lookup_timeout_seconds,
+                retention_dir=Path(retention_dir) if retention_dir is not None else None,
+                progress_callback_present=callable(kwargs.get("progress_callback")),
+            )
+        )
+        return LegacyResultStub()
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.ingest_source_to_db", fake_ingest_source_to_db)
+
+    result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=1 markers=0 issues=0\n"
+    assert len(calls) == 1
+
+
+
 def test_ingest_reporter_failures_do_not_change_success_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     source = write_manifest(tmp_path / "playlist.m3u8")
     transcript = write_transcript(tmp_path / "transcript.json")

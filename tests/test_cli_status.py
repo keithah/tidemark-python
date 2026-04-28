@@ -156,6 +156,45 @@ def test_status_lists_multiple_records_with_state_details_and_redaction(tmp_path
     assert "abc123" not in output
 
 
+def test_status_prints_ingest_restart_counters_with_sorted_numeric_formatter(tmp_path: Path) -> None:
+    runtime_dir = tmp_path / "runtime"
+    write_record(
+        runtime_dir,
+        record(
+            "ingest-restart-run",
+            command="ingest",
+            phase="completed",
+            counters={
+                "segments": 5,
+                "processed": 2,
+                "skipped": 3,
+                "failed": 1,
+                "words": 42,
+                "markers": 4,
+                "issues": 1,
+                "retained": 2,
+                "songs": 1,
+            },
+            terminal=True,
+            terminal_reason="finished",
+            source_label="fixture://private.example/live.m3u8?token=secret",
+        ),
+    )
+
+    result = invoke(["status", "--runtime-dir", str(runtime_dir)])
+
+    assert result.exit_code == 0, result.output
+    assert "ingest-restart-run" in result.stdout
+    assert "command=ingest" in result.stdout
+    assert (
+        "counters=failed=1,issues=1,markers=4,processed=2,retained=2,segments=5,skipped=3,songs=1,words=42"
+        in result.stdout
+    )
+    assert "token=secret" not in result.stdout
+    assert str(runtime_dir) not in result.stdout
+
+
+
 def test_status_reports_malformed_files_as_diagnostics_without_crashing_or_leaking(tmp_path: Path) -> None:
     runtime_dir = tmp_path / "runtime"
     runs_dir = runtime_dir / "runs"
