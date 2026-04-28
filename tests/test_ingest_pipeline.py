@@ -11,6 +11,7 @@ import imageio_ffmpeg
 import pytest
 
 from tidemark.ingest.pipeline import (
+    IngestPipelineProgress,
     IngestPipelineResult,
     TranscriptFixtureError,
     ingest_source_to_db,
@@ -163,6 +164,77 @@ def test_ingest_source_to_db_persists_segments_words_markers_and_searches(tmp_pa
     assert search_result.hit_end_ts == pytest.approx(0.16)
     assert search_result.context_text == "hello tidemark search"
     assert search_result.word_ids == result.transcript_word_ids[1:]
+
+
+def test_ingest_source_to_db_reports_progress_with_compact_redacted_counters(tmp_path: Path) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "private-playlist.m3u8", media_path.name)
+    db_path = tmp_path / "tidemark.sqlite3"
+    events: list[IngestPipelineProgress] = []
+
+    result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber(
+            [
+                ("private transcript phrase", 0.03, 0.06, 0.9),
+                ("RAW-FINGERPRINT-SECRET", 0.07, 0.11, 0.8),
+            ],
+            language="en",
+            engine="deterministic-fixture",
+        ),
+        source_url="https://example.test/private/live.m3u8?token=secret",
+        fingerprint=True,
+        fingerprint_backend=_secret_fingerprint_backend,
+        lookup_adapter=_lookup_adapter,
+        acoustid_api_key="sk_live_secret_key",
+        progress_callback=events.append,
+    )
+
+    assert result.issues == ()
+    assert [event.phase for event in events] == ["resolving", "running", "completed"]
+    assert events[0].counters == {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}
+    assert events[1].counters == {"segments": 1, "words": 2, "markers": 1, "issues": 0, "retained": 1, "songs": 1}
+    assert events[-1].counters == events[1].counters
+    serialized_events = json.dumps(
+        [{"phase": event.phase, "counters": event.counters, "error": event.error} for event in events],
+        sort_keys=True,
+    )
+    for secret in (
+        "private transcript phrase",
+        "RAW-FINGERPRINT-SECRET",
+        "sk_live_secret_key",
+        "token=secret",
+        str(tmp_path),
+    ):
+        assert secret not in serialized_events
+
+
+def test_ingest_progress_callback_failures_do_not_change_pipeline_result(tmp_path: Path) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "playlist.m3u8", media_path.name, include_cue=False)
+    db_path = tmp_path / "tidemark.sqlite3"
+    attempts = 0
+
+    def failing_callback(_progress: IngestPipelineProgress) -> None:
+        nonlocal attempts
+        attempts += 1
+        raise RuntimeError("reporter write failed token=secret")
+
+    result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        include_manifest_markers=False,
+        progress_callback=failing_callback,
+    )
+
+    assert attempts >= 2
+    assert result.issues == ()
+    assert len(result.segment_ids) == 1
+    assert len(result.transcript_word_ids) == 1
+    assert _fetch_count(db_path, "segments") == 1
+    assert _fetch_count(db_path, "transcript_words") == 1
 
 
 def test_default_ingest_does_not_create_fingerprint_or_retained_audio_side_effects(tmp_path: Path) -> None:

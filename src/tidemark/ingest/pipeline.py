@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from numbers import Real
+from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
@@ -23,6 +24,18 @@ class IngestIssue:
     phase: str
     segment_sequence: int | None
     message: str
+
+
+@dataclass(frozen=True)
+class IngestPipelineProgress:
+    """Compact, redacted ingest progress counters for runtime health surfaces."""
+
+    phase: str
+    counters: dict[str, int]
+    error: str | None = None
+
+
+ProgressCallback = Callable[[IngestPipelineProgress], None]
 
 
 @dataclass(frozen=True)
@@ -72,6 +85,7 @@ def ingest_source_to_db(
     acoustid_api_key: str | None = None,
     lookup_timeout_seconds: float | None = None,
     retention_dir: str | Path | None = None,
+    progress_callback: ProgressCallback | None = None,
 ) -> IngestPipelineResult:
     """Resolve, store, decode, and optionally transcribe/fingerprint local media input.
 
@@ -81,6 +95,7 @@ def ingest_source_to_db(
     and lookup failures surface as redacted per-segment issues without blocking
     later optional work for the same decoded segment.
     """
+    _notify_progress(progress_callback, "resolving", _empty_progress_counters())
     segments = resolve_segments(source, source_url=source_url)
     from tidemark.store import initialize_db, insert_transcript_words
 
@@ -148,7 +163,20 @@ def ingest_source_to_db(
                     issues=issues,
                 )
 
-        return IngestPipelineResult(
+            _notify_progress(
+                progress_callback,
+                "running",
+                _progress_counters(
+                    segment_ids=segment_ids,
+                    transcript_word_ids=transcript_word_ids,
+                    ad_event_ids=ad_event_ids,
+                    issues=issues,
+                    retained_audio_ids=retained_audio_ids,
+                    song_ids=song_ids,
+                ),
+            )
+
+        result = IngestPipelineResult(
             segment_ids=tuple(segment_ids),
             transcript_word_ids=tuple(transcript_word_ids),
             ad_event_ids=tuple(ad_event_ids),
@@ -156,8 +184,59 @@ def ingest_source_to_db(
             retained_audio_ids=tuple(retained_audio_ids),
             song_ids=tuple(song_ids),
         )
+        _notify_progress(progress_callback, "completed", _result_counters(result))
+        return result
     finally:
         conn.close()
+
+
+def _empty_progress_counters() -> dict[str, int]:
+    return {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}
+
+
+def _progress_counters(
+    *,
+    segment_ids: list[int],
+    transcript_word_ids: list[int],
+    ad_event_ids: list[int],
+    issues: list[IngestIssue],
+    retained_audio_ids: list[int],
+    song_ids: list[int],
+) -> dict[str, int]:
+    return {
+        "segments": len(segment_ids),
+        "words": len(transcript_word_ids),
+        "markers": len(ad_event_ids),
+        "issues": len(issues),
+        "retained": len(retained_audio_ids),
+        "songs": len(song_ids),
+    }
+
+
+def _result_counters(result: IngestPipelineResult) -> dict[str, int]:
+    return {
+        "segments": len(result.segment_ids),
+        "words": len(result.transcript_word_ids),
+        "markers": len(result.ad_event_ids),
+        "issues": len(result.issues),
+        "retained": len(result.retained_audio_ids),
+        "songs": len(result.song_ids),
+    }
+
+
+def _notify_progress(
+    progress_callback: ProgressCallback | None,
+    phase: str,
+    counters: dict[str, int],
+    *,
+    error: str | None = None,
+) -> None:
+    if progress_callback is None:
+        return
+    try:
+        progress_callback(IngestPipelineProgress(phase=phase, counters=dict(counters), error=error))
+    except Exception:
+        pass
 
 
 def _fixture_word_from_object(item: object) -> FixtureTranscriptWord:
@@ -344,3 +423,13 @@ def _safe_store_message(exc: Exception) -> str:
     if "insert_transcript_words()" in message:
         return message
     return "transcript word store failed"
+
+
+__all__ = [
+    "IngestIssue",
+    "IngestPipelineProgress",
+    "IngestPipelineResult",
+    "TranscriptFixtureError",
+    "ingest_source_to_db",
+    "load_fixture_transcript",
+]

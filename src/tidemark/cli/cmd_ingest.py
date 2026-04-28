@@ -7,9 +7,16 @@ from typing import Annotated
 
 import typer
 
-from tidemark.config import ConfigError, IngestOverrides, load_config, resolve_ingest_options
+from tidemark.config import ConfigError, IngestOverrides, default_runtime_dir, load_config, resolve_ingest_options
 from tidemark.ingest import SegmentIngestError
-from tidemark.ingest.pipeline import TranscriptFixtureError, ingest_source_to_db, load_fixture_transcript
+from tidemark.ingest.pipeline import (
+    IngestPipelineProgress,
+    IngestPipelineResult,
+    TranscriptFixtureError,
+    ingest_source_to_db,
+    load_fixture_transcript,
+)
+from tidemark.runtime.health import HealthReporter, create_reporter
 from tidemark.transcribe import DeterministicTranscriber
 
 
@@ -67,15 +74,28 @@ def run_ingest_command(
     except ConfigError as exc:
         _fatal(str(exc))
 
+    reporter = _create_ingest_reporter(
+        Path(config.paths.runtime_dir or default_runtime_dir()).expanduser(),
+        source=source_url or source,
+    )
+    _report_start(reporter)
+
     fixture_words = None
     if fixture_transcript is not None:
         try:
             fixture_words = load_fixture_transcript(fixture_transcript)
         except TranscriptFixtureError as exc:
+            _report_fail(reporter, str(exc), reason="fixture_error")
             _fatal(str(exc))
         except Exception:
+            _report_fail(reporter, "fixture transcript could not be loaded", reason="fixture_error")
             _fatal("fixture transcript could not be loaded")
     elif not resolved.fingerprint:
+        _report_fail(
+            reporter,
+            "--fixture-transcript is required unless --fingerprint is enabled",
+            reason="fixture_error",
+        )
         _fatal("--fixture-transcript is required unless --fingerprint is enabled")
 
     transcriber = None
@@ -97,12 +117,17 @@ def run_ingest_command(
             acoustid_api_key=resolved.acoustid_api_key if resolved.fingerprint else None,
             lookup_timeout_seconds=resolved.lookup_timeout_seconds,
             retention_dir=resolved.retention_dir,
+            progress_callback=_ingest_progress_callback(reporter),
         )
     except SegmentIngestError as exc:
+        _report_fail(reporter, str(exc), reason="source_error")
         _fatal(str(exc))
-    except Exception:
+    except Exception as exc:
+        _report_fail(reporter, str(exc), reason="pipeline_error")
         _fatal("ingest failed")
 
+    final_counters = _result_counters(result)
+    _report_finish(reporter, counters=final_counters)
     output = (
         "Ingest complete: "
         f"segments={len(result.segment_ids)} "
@@ -134,6 +159,82 @@ def ingest(
         fingerprint=fingerprint,
         config_path=config_path,
     )
+
+
+def _empty_counters() -> dict[str, int]:
+    return {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}
+
+
+def _result_counters(result: IngestPipelineResult) -> dict[str, int]:
+    return {
+        "segments": len(result.segment_ids),
+        "words": len(result.transcript_word_ids),
+        "markers": len(result.ad_event_ids),
+        "issues": len(result.issues),
+        "retained": len(result.retained_audio_ids),
+        "songs": len(result.song_ids),
+    }
+
+
+def _create_ingest_reporter(runtime_dir: Path, *, source: object) -> HealthReporter | None:
+    try:
+        return create_reporter(runtime_dir, command="ingest", source=source)
+    except Exception:
+        return None
+
+
+def _ingest_progress_callback(reporter: HealthReporter | None):
+    def record(progress: IngestPipelineProgress) -> None:
+        if progress.phase == "completed":
+            _report_finish(reporter, counters=progress.counters)
+        elif progress.phase == "error":
+            _report_fail(reporter, progress.error or "ingest failed", reason="pipeline_error", counters=progress.counters)
+        else:
+            _report_update(reporter, phase=progress.phase, counters=progress.counters)
+
+    return record
+
+
+def _report_start(reporter: HealthReporter | None) -> None:
+    if reporter is None:
+        return
+    try:
+        reporter.start(phase="setup", counters=_empty_counters())
+    except Exception:
+        pass
+
+
+def _report_update(reporter: HealthReporter | None, *, phase: str, counters: dict[str, int]) -> None:
+    if reporter is None:
+        return
+    try:
+        reporter.update(phase=phase, counters=counters)
+    except Exception:
+        pass
+
+
+def _report_finish(reporter: HealthReporter | None, *, counters: dict[str, int]) -> None:
+    if reporter is None:
+        return
+    try:
+        reporter.finish(phase="completed", reason="finished", counters=counters)
+    except Exception:
+        pass
+
+
+def _report_fail(
+    reporter: HealthReporter | None,
+    error: object,
+    *,
+    reason: str,
+    counters: dict[str, int] | None = None,
+) -> None:
+    if reporter is None:
+        return
+    try:
+        reporter.fail(error, phase="error", reason=reason, counters=counters or _empty_counters())
+    except Exception:
+        pass
 
 
 def _fatal(message: str) -> None:

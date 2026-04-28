@@ -3,11 +3,12 @@ from __future__ import annotations
 import json
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.testing import CliRunner
 
-from tidemark.ingest.pipeline import IngestPipelineResult
+from tidemark.ingest.pipeline import IngestPipelineProgress, IngestPipelineResult
 
 
 runner = CliRunner()
@@ -33,6 +34,7 @@ class IngestCall:
     acoustid_api_key: str | None
     lookup_timeout_seconds: float | None
     retention_dir: Path | None
+    progress_callback_present: bool = True
 
 
 def write_manifest(path: Path, segment_name: str = "segment.ts") -> Path:
@@ -100,12 +102,205 @@ def patch_ingest(monkeypatch: pytest.MonkeyPatch, result: IngestPipelineResult) 
                 acoustid_api_key=acoustid_api_key,
                 lookup_timeout_seconds=lookup_timeout_seconds,
                 retention_dir=Path(retention_dir) if retention_dir is not None else None,
+                progress_callback_present=callable(kwargs.get("progress_callback")),
             )
         )
+        progress_callback = kwargs.get("progress_callback")
+        if callable(progress_callback):
+            progress_callback(
+                IngestPipelineProgress(
+                    phase="running",
+                    counters={"segments": 1, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0},
+                )
+            )
         return result
 
     monkeypatch.setattr("tidemark.cli.cmd_ingest.ingest_source_to_db", fake_ingest_source_to_db)
     return calls
+
+
+class RecordingReporter:
+    def __init__(self, events: list[tuple[str, dict[str, object]]]) -> None:
+        self.events = events
+
+    def start(self, **kwargs: object) -> None:
+        self.events.append(("start", dict(kwargs)))
+
+    def update(self, **kwargs: object) -> None:
+        self.events.append(("update", dict(kwargs)))
+
+    def finish(self, **kwargs: object) -> None:
+        self.events.append(("finish", dict(kwargs)))
+
+    def fail(self, error: object, **kwargs: object) -> None:
+        self.events.append(("fail", {"error": error, **kwargs}))
+
+
+def test_ingest_command_creates_reporter_and_records_progress_and_final_counts(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = write_manifest(tmp_path / "private-playlist.m3u8")
+    transcript = write_transcript(tmp_path / "private-transcript.json")
+    config_path = tmp_path / "tidemark.toml"
+    runtime_dir = tmp_path / "runtime"
+    db_path = tmp_path / "tidemark.sqlite3"
+    config_path.write_text(f'[paths]\nruntime_dir = "{runtime_dir}"\n', encoding="utf-8")
+    events: list[tuple[str, dict[str, object]]] = []
+    reporter_calls: list[dict[str, object]] = []
+    calls = patch_ingest(
+        monkeypatch,
+        IngestPipelineResult(
+            segment_ids=(11,),
+            transcript_word_ids=(101, 102),
+            ad_event_ids=(5,),
+            retained_audio_ids=(20,),
+            song_ids=(30,),
+            issues=(object(),),  # type: ignore[arg-type]
+        ),
+    )
+
+    def fake_create_reporter(runtime_dir_arg: Path, *, command: str, source: object, **kwargs: Any) -> RecordingReporter:
+        reporter_calls.append({"runtime_dir": runtime_dir_arg, "command": command, "source": source, **kwargs})
+        return RecordingReporter(events)
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.create_reporter", fake_create_reporter)
+
+    result = invoke(
+        [
+            "ingest",
+            str(source),
+            "--db",
+            str(db_path),
+            "--fixture-transcript",
+            str(transcript),
+            "--fingerprint",
+            "--source-url",
+            "https://example.test/private/live.m3u8?token=secret",
+            "--config",
+            str(config_path),
+        ]
+    )
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Ingest complete: segments=1 words=2 markers=1 retained=1 songs=1 issues=1\n"
+    assert result.stderr == ""
+    assert len(calls) == 1
+    assert calls[0].progress_callback_present is True
+    assert reporter_calls == [
+        {
+            "runtime_dir": runtime_dir,
+            "command": "ingest",
+            "source": "https://example.test/private/live.m3u8?token=secret",
+        }
+    ]
+    assert events == [
+        ("start", {"phase": "setup", "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
+        ("update", {"phase": "running", "counters": {"segments": 1, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
+        ("finish", {"phase": "completed", "reason": "finished", "counters": {"segments": 1, "words": 2, "markers": 1, "issues": 1, "retained": 1, "songs": 1}}),
+    ]
+
+
+def test_ingest_reporter_failures_do_not_change_success_output(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    source = write_manifest(tmp_path / "playlist.m3u8")
+    transcript = write_transcript(tmp_path / "transcript.json")
+    patch_ingest(
+        monkeypatch,
+        IngestPipelineResult(segment_ids=(11,), transcript_word_ids=(101,), ad_event_ids=(), issues=()),
+    )
+
+    class FailingReporter:
+        def start(self, **kwargs: object) -> None:  # noqa: ARG002
+            raise OSError("status write failed")
+
+        def update(self, **kwargs: object) -> None:  # noqa: ARG002
+            raise OSError("status write failed")
+
+        def finish(self, **kwargs: object) -> None:  # noqa: ARG002
+            raise OSError("status write failed")
+
+        def fail(self, error: object, **kwargs: object) -> None:  # noqa: ARG002
+            raise OSError("status write failed")
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.create_reporter", lambda *args, **kwargs: FailingReporter())
+
+    result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript)])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == "Ingest complete: segments=1 words=1 markers=0 issues=0\n"
+    assert result.stderr == ""
+
+
+def test_ingest_command_records_pipeline_failure_without_changing_fatal_stderr(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = write_manifest(tmp_path / "private-playlist.m3u8")
+    transcript = write_transcript(tmp_path / "private-transcript.json")
+    events: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.create_reporter", lambda *args, **kwargs: RecordingReporter(events))
+
+    def fail_pipeline(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("pipeline failed for /tmp/private/source.m3u8 token=secret")
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.ingest_source_to_db", fail_pipeline)
+
+    result = invoke(
+        [
+            "ingest",
+            str(source),
+            "--fixture-transcript",
+            str(transcript),
+            "--source-url",
+            "https://example.test/private/live.m3u8?token=secret",
+        ]
+    )
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert result.stderr == "[tidemark] error: ingest failed\n"
+    assert "private" not in result.stderr
+    assert "token=secret" not in result.stderr
+    assert events == [
+        ("start", {"phase": "setup", "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
+        (
+            "fail",
+            {
+                "error": "pipeline failed for /tmp/private/source.m3u8 token=secret",
+                "phase": "error",
+                "reason": "pipeline_error",
+                "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0},
+            },
+        ),
+    ]
+
+
+def test_ingest_command_records_fixture_validation_failure_when_reporter_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    source = write_manifest(tmp_path / "private-playlist.m3u8")
+    transcript = write_transcript(tmp_path / "private-transcript.json", [{"text": "private transcript", "start_offset": -1, "end_offset": 1}])
+    events: list[tuple[str, dict[str, object]]] = []
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.create_reporter", lambda *args, **kwargs: RecordingReporter(events))
+
+    result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript)])
+
+    assert result.exit_code == 1
+    assert result.stdout == ""
+    assert "[tidemark] error: start_offset" in result.stderr
+    assert "private transcript" not in result.stderr
+    assert events == [
+        ("start", {"phase": "setup", "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
+        (
+            "fail",
+            {
+                "error": "start_offset must be >= 0",
+                "phase": "error",
+                "reason": "fixture_error",
+                "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0},
+            },
+        ),
+    ]
 
 
 def test_ingest_command_delegates_once_and_prints_safe_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
