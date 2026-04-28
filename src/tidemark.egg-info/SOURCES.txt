@@ -6,8 +6,12 @@ src/tidemark/monitor_sources.py
 src/tidemark.egg-info/PKG-INFO
 src/tidemark.egg-info/SOURCES.txt
 src/tidemark.egg-info/dependency_links.txt
+src/tidemark.egg-info/entry_points.txt
 src/tidemark.egg-info/requires.txt
 src/tidemark.egg-info/top_level.txt
+src/tidemark/cli/__init__.py
+src/tidemark/cli/cmd_monitor.py
+src/tidemark/cli/main.py
 src/tidemark/ingest/__init__.py
 src/tidemark/ingest/hls.py
 src/tidemark/ingest/icy.py
@@ -21,6 +25,7 @@ src/tidemark/markers/scte35.py
 src/tidemark/store/__init__.py
 src/tidemark/store/db.py
 tests/test_classifier.py
+tests/test_cli_monitor.py
 tests/test_hls_ingest.py
 tests/test_icy_ingest.py
 tests/test_id3_markers.py

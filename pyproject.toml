@@ -12,10 +12,13 @@ license = { text = "Proprietary" }
 authors = [
     { name = "tidemark contributors" },
 ]
-dependencies = ["mutagen>=1.47"]
+dependencies = ["mutagen>=1.47", "typer>=0.12"]
 
 [project.optional-dependencies]
 dev = ["pytest"]
+
+[project.scripts]
+tidemark = "tidemark.cli.main:app"
 
 [tool.setuptools.packages.find]
 where = ["src"]
