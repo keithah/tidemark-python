@@ -19,6 +19,7 @@ class CliStreamType(str, Enum):
     AUTO = "auto"
     HLS = "hls"
     ICECAST = "icecast"
+    ICY = "icy"
     MPEGTS = "mpegts"
     UDP = "udp"
 

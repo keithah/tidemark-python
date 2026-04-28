@@ -14,6 +14,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 _EMPTY_OPTIONAL_VALUES = (None, [], {})
 _PYTHON_ONLY_SCTE35_KEYS = {"RawBase64", "Command", "Descriptors"}
+RoutePayload = bytes | tuple[bytes, str] | tuple[bytes, str, Mapping[str, str]]
 
 
 @dataclass(frozen=True)
@@ -129,15 +130,19 @@ def normalize_markers(markers: list[Mapping[str, Any]], *, sort: bool = False) -
 
 
 @contextmanager
-def serve_http_fixture(routes: Mapping[str, bytes | tuple[bytes, str]]) -> Iterator[str]:
-    normalized_routes: dict[str, tuple[bytes, str]] = {}
+def serve_http_fixture(routes: Mapping[str, RoutePayload]) -> Iterator[str]:
+    normalized_routes: dict[str, tuple[bytes, str, dict[str, str]]] = {}
     for path, payload in routes.items():
         assert path.startswith("/"), f"fixture route must start with '/': {path}"
         if isinstance(payload, tuple):
-            body, content_type = payload
+            if len(payload) == 2:
+                body, content_type = payload
+                headers = {}
+            else:
+                body, content_type, headers = payload
         else:
-            body, content_type = payload, "application/octet-stream"
-        normalized_routes[path] = (body, content_type)
+            body, content_type, headers = payload, "application/octet-stream", {}
+        normalized_routes[path] = (body, content_type, dict(headers))
 
     class FixtureHandler(BaseHTTPRequestHandler):
         def do_GET(self) -> None:  # noqa: N802
@@ -145,10 +150,12 @@ def serve_http_fixture(routes: Mapping[str, bytes | tuple[bytes, str]]) -> Itera
             if route is None:
                 self.send_error(404)
                 return
-            body, content_type = route
+            body, content_type, headers = route
             self.send_response(200)
             self.send_header("Content-Type", content_type)
             self.send_header("Content-Length", str(len(body)))
+            for header, value in headers.items():
+                self.send_header(header, value)
             self.end_headers()
             self.wfile.write(body)
 

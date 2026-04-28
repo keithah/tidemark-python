@@ -65,6 +65,8 @@ def decode_scte35_markers_from_mpegts(
         raise TypeError("SCTE-35 MPEGTS segment data must be bytes")
     if not data:
         return []
+    if not _looks_like_mpegts(data):
+        return []
 
     cues: list[threefive.Cue] = []
 
@@ -89,6 +91,22 @@ def decode_scte35_markers_from_mpegts(
             )
         )
     return markers
+
+
+def _looks_like_mpegts(data: bytes) -> bool:
+    """Return True when bytes contain a plausible MPEG-TS packet sync alignment."""
+    max_offset = min(len(data), 188)
+    for offset in range(max_offset):
+        if data[offset] != 0x47:
+            continue
+        packet_count = 0
+        cursor = offset
+        while cursor < len(data) and data[cursor] == 0x47:
+            packet_count += 1
+            if packet_count >= 2:
+                return True
+            cursor += 188
+    return False
 
 
 def marker_from_scte35_cue(
