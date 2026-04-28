@@ -6,6 +6,7 @@ import click
 import typer
 from typer.core import TyperGroup
 
+from tidemark.cli.cmd_ingest import ingest
 from tidemark.cli.cmd_monitor import monitor
 from tidemark.cli.cmd_search import search
 
@@ -41,6 +42,7 @@ def root() -> None:
     """Detect ad markers in HLS, ICY, MPEG-TS, and UDP streams."""
 
 
+app.command(name="ingest")(ingest)
 app.command(name="monitor")(monitor)
 app.command(name="search")(search)
 
