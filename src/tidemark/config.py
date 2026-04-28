@@ -8,6 +8,7 @@ provided.
 
 from __future__ import annotations
 
+import math
 import os
 import tomllib
 from dataclasses import dataclass, replace
@@ -64,6 +65,9 @@ class PathsConfig:
 class MonitorConfig:
     stream_type: str = "auto"
     timeout_seconds: float | None = None
+    retry_attempts: int = 0
+    retry_initial_backoff_seconds: float = 0.0
+    retry_max_backoff_seconds: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -107,6 +111,9 @@ class MonitorOverrides:
     db_path: Path | None = None
     stream_type: str | None = None
     timeout_seconds: float | None = None
+    retry_attempts: int | None = None
+    retry_initial_backoff_seconds: float | None = None
+    retry_max_backoff_seconds: float | None = None
 
 
 @dataclass(frozen=True)
@@ -114,6 +121,9 @@ class MonitorOptions:
     db_path: Path
     stream_type: str
     timeout_seconds: float | None
+    retry_attempts: int
+    retry_initial_backoff_seconds: float
+    retry_max_backoff_seconds: float
 
 
 @dataclass(frozen=True)
@@ -175,7 +185,15 @@ class ClipOptions:
 _SECTION_FIELDS: Mapping[str, frozenset[str]] = MappingProxyType(
     {
         "paths": frozenset({"db", "runtime_dir", "log_file", "retention_dir"}),
-        "monitor": frozenset({"stream_type", "timeout_seconds"}),
+        "monitor": frozenset(
+            {
+                "stream_type",
+                "timeout_seconds",
+                "retry_attempts",
+                "retry_initial_backoff_seconds",
+                "retry_max_backoff_seconds",
+            }
+        ),
         "ingest": frozenset({"include_manifest_markers", "fingerprint"}),
         "search": frozenset({"context_seconds"}),
         "report": frozenset({"min_score", "min_count"}),
@@ -193,6 +211,9 @@ _ENV_FIELDS: Mapping[str, tuple[str, str]] = MappingProxyType(
         "TIDEMARK_RETENTION_DIR": ("paths", "retention_dir"),
         "TIDEMARK_MONITOR_STREAM_TYPE": ("monitor", "stream_type"),
         "TIDEMARK_MONITOR_TIMEOUT_SECONDS": ("monitor", "timeout_seconds"),
+        "TIDEMARK_MONITOR_RETRY_ATTEMPTS": ("monitor", "retry_attempts"),
+        "TIDEMARK_MONITOR_RETRY_INITIAL_BACKOFF_SECONDS": ("monitor", "retry_initial_backoff_seconds"),
+        "TIDEMARK_MONITOR_RETRY_MAX_BACKOFF_SECONDS": ("monitor", "retry_max_backoff_seconds"),
         "TIDEMARK_INGEST_INCLUDE_MANIFEST_MARKERS": ("ingest", "include_manifest_markers"),
         "TIDEMARK_INGEST_FINGERPRINT": ("ingest", "fingerprint"),
         "TIDEMARK_LOOKUP_TIMEOUT_SECONDS": ("fingerprint", "lookup_timeout_seconds"),
@@ -245,6 +266,15 @@ def resolve_monitor_options(config: TidemarkConfig, overrides: MonitorOverrides 
     overrides = overrides or MonitorOverrides()
     stream_type = _coalesce(overrides.stream_type, config.monitor.stream_type)
     timeout_seconds = _coalesce(overrides.timeout_seconds, config.monitor.timeout_seconds)
+    retry_attempts = _coalesce(overrides.retry_attempts, config.monitor.retry_attempts)
+    retry_initial_backoff_seconds = _coalesce(
+        overrides.retry_initial_backoff_seconds,
+        config.monitor.retry_initial_backoff_seconds,
+    )
+    retry_max_backoff_seconds = _coalesce(
+        overrides.retry_max_backoff_seconds,
+        config.monitor.retry_max_backoff_seconds,
+    )
     return MonitorOptions(
         db_path=_coalesce(overrides.db_path, config.paths.db),
         stream_type=_validate_stream_type(stream_type, field_path="monitor.stream_type", source="CLI"),
@@ -252,6 +282,21 @@ def resolve_monitor_options(config: TidemarkConfig, overrides: MonitorOverrides 
             timeout_seconds,
             field_path="monitor.timeout_seconds",
             source="CLI" if overrides.timeout_seconds is not None else "config",
+        ),
+        retry_attempts=_validate_non_negative_int(
+            retry_attempts,
+            field_path="monitor.retry_attempts",
+            source="CLI" if overrides.retry_attempts is not None else "config",
+        ),
+        retry_initial_backoff_seconds=_validate_non_negative_float(
+            retry_initial_backoff_seconds,
+            field_path="monitor.retry_initial_backoff_seconds",
+            source="CLI" if overrides.retry_initial_backoff_seconds is not None else "config",
+        ),
+        retry_max_backoff_seconds=_validate_non_negative_float(
+            retry_max_backoff_seconds,
+            field_path="monitor.retry_max_backoff_seconds",
+            source="CLI" if overrides.retry_max_backoff_seconds is not None else "config",
         ),
     )
 
@@ -392,8 +437,12 @@ def _apply_value(config: TidemarkConfig, section: str, field: str, value: object
     if section == "monitor":
         if field == "stream_type":
             parsed = _validate_stream_type(value, field_path=field_path, source=source)
-        else:
+        elif field == "timeout_seconds":
             parsed = _parse_optional_non_negative_float(value, field_path=field_path, source=source)
+        elif field == "retry_attempts":
+            parsed = _parse_non_negative_int(value, field_path=field_path, source=source)
+        else:
+            parsed = _parse_non_negative_float(value, field_path=field_path, source=source)
         return replace(config, monitor=replace(config.monitor, **{field: parsed}))
     if section == "ingest":
         parsed = _parse_bool(value, field_path=field_path, source=source)
@@ -464,12 +513,18 @@ def _parse_float(value: object, *, field_path: str, source: str) -> float:
     if isinstance(value, bool):
         _invalid("number must be a float", field_path=field_path, source=source, value=value)
     if isinstance(value, (int, float)):
-        return float(value)
+        parsed = float(value)
+        if not math.isfinite(parsed):
+            _invalid("number must be finite", field_path=field_path, source=source, value=value)
+        return parsed
     if isinstance(value, str):
         try:
-            return float(value.strip())
+            parsed = float(value.strip())
         except ValueError:
             _invalid("number is invalid", field_path=field_path, source=source, value=value)
+        if not math.isfinite(parsed):
+            _invalid("number must be finite", field_path=field_path, source=source, value=value)
+        return parsed
     _invalid("number must be a float", field_path=field_path, source=source, value=value)
 
 
@@ -521,9 +576,19 @@ def _validate_non_negative_float(value: object, *, field_path: str, source: str)
     if not isinstance(value, (int, float)) or isinstance(value, bool):
         _invalid("number must be a float", field_path=field_path, source=source, value=value)
     parsed = float(value)
+    if not math.isfinite(parsed):
+        _invalid("number must be finite", field_path=field_path, source=source, value=value)
     if parsed < 0:
         _invalid("number must be >= 0", field_path=field_path, source=source, value=value)
     return parsed
+
+
+def _validate_non_negative_int(value: object, *, field_path: str, source: str) -> int:
+    if not isinstance(value, int) or isinstance(value, bool):
+        _invalid("integer must be an int", field_path=field_path, source=source, value=value)
+    if value < 0:
+        _invalid("integer must be >= 0", field_path=field_path, source=source, value=value)
+    return value
 
 
 def _validate_score(value: object, *, field_path: str, source: str) -> float:

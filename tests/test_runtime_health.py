@@ -14,6 +14,7 @@ from tidemark.runtime.health import (
     RetryState,
     classify_record,
     create_reporter,
+    format_status_report,
     make_run_id,
     read_status_entries,
     redact_source_label,
@@ -303,6 +304,107 @@ def test_pid_probe_errors_classify_conservatively_as_stale_or_not_running() -> N
     diagnostics = "\n".join(d.message for d in fresh_entry.diagnostics + old_entry.diagnostics)
     assert "private failure" not in diagnostics
     assert "pid liveness probe failed" in diagnostics
+
+
+def test_reporter_retry_persists_redacted_retry_state_and_preserves_counters(tmp_path: Path) -> None:
+    reporter = create_reporter(
+        tmp_path,
+        command="monitor",
+        source="https://example.test/live?token=secret",
+        run_id="retry-run",
+        pid=100,
+        now=lambda: utc("2026-04-28T12:00:00+00:00"),
+    )
+    assert reporter.start(phase="polling", counters={"segments": 2}).ok is True
+
+    result = reporter.retry(
+        attempt=2,
+        next_retry_at=utc("2026-04-28T12:00:05+00:00"),
+        error="transient api_key=secret from https://example.test/live?token=secret",
+        phase="retrying",
+        counters={"errors": 1},
+    )
+
+    assert result.ok is True
+    entries, diagnostics = read_status_entries(
+        tmp_path,
+        now=utc("2026-04-28T12:00:01+00:00"),
+        pid_exists=lambda pid: True,
+    )
+    assert diagnostics == []
+    assert len(entries) == 1
+    record = entries[0].record
+    assert record.phase == "retrying"
+    assert record.counters == {"segments": 2, "errors": 1}
+    assert record.retry == RetryState(
+        attempt=2,
+        next_retry_at=utc("2026-04-28T12:00:05+00:00"),
+        last_retry_error="transient api_key=[redacted] from example.test/live",
+    )
+    payload = json.loads(result.path.read_text(encoding="utf-8"))
+    assert payload["retry"] == {
+        "attempt": 2,
+        "next_retry_at": "2026-04-28T12:00:05Z",
+        "last_retry_error": "transient api_key=[redacted] from example.test/live",
+    }
+
+
+def test_format_status_report_retry_output_remains_compact_and_redacted(tmp_path: Path) -> None:
+    record = HealthRecord(
+        run_id="retry-run",
+        command="monitor",
+        source_label="source",
+        pid=100,
+        started_at=utc("2026-04-28T12:00:00+00:00"),
+        heartbeat_at=utc("2026-04-28T12:00:01+00:00"),
+        phase="retrying",
+        counters={"errors": 1},
+        retry=RetryState(
+            attempt=3,
+            next_retry_at=utc("2026-04-28T12:00:10+00:00"),
+            last_retry_error="raw token=secret from https://example.test/live?token=secret",
+        ),
+    )
+    entry = classify_record(record, now=utc("2026-04-28T12:00:02+00:00"), pid_exists=lambda pid: True)
+
+    report = format_status_report([entry], [], runtime_dir=tmp_path)
+
+    assert "retry=attempt=3,next=2026-04-28T12:00:10Z,last_error=raw token=[redacted] from example.test/live" in report
+    assert "token=secret" not in report
+    assert str(tmp_path) not in report
+
+
+def test_reporter_retry_write_failure_is_returned_not_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    reporter = create_reporter(
+        tmp_path,
+        command="monitor",
+        source="safe",
+        run_id="retry-run",
+        pid=100,
+        now=lambda: utc("2026-04-28T12:00:00+00:00"),
+    )
+
+    def fail_replace(self: Path, target: Path) -> Path:
+        raise OSError("/private/path raw-token=secret")
+
+    monkeypatch.setattr(Path, "replace", fail_replace)
+
+    result = reporter.retry(
+        attempt=1,
+        next_retry_at=utc("2026-04-28T12:00:05+00:00"),
+        error="raw token=secret",
+    )
+
+    assert result.ok is False
+    assert result.diagnostic is not None
+    assert result.diagnostic.file_name == "retry-run.json"
+    assert "secret" not in result.diagnostic.message
+    assert reporter.record.retry.attempt == 1
+
+
+def test_retry_state_rejects_non_datetime_next_retry_values() -> None:
+    with pytest.raises(ValueError):
+        RetryState(attempt=1, next_retry_at="not-a-datetime")  # type: ignore[arg-type]
 
 
 def test_reporter_write_failure_is_returned_not_raised(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

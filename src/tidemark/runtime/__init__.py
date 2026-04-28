@@ -16,6 +16,7 @@ from tidemark.runtime.health import (
     read_status_entries,
     redact_source_label,
 )
+from tidemark.runtime.retry import RetryDecision, RetryPolicy
 
 __all__ = [
     "DEFAULT_STALE_AFTER_SECONDS",
@@ -23,6 +24,8 @@ __all__ = [
     "HealthRecord",
     "HealthReporter",
     "ReadDiagnostic",
+    "RetryDecision",
+    "RetryPolicy",
     "RetryState",
     "StatusEntry",
     "WriteResult",

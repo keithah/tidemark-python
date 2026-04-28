@@ -45,6 +45,9 @@ def test_missing_default_config_is_ignored(tmp_path: Path, monkeypatch: pytest.M
     assert config.fingerprint.enabled is False
     assert config.monitor.stream_type == "auto"
     assert config.monitor.timeout_seconds is None
+    assert config.monitor.retry_attempts == 0
+    assert config.monitor.retry_initial_backoff_seconds == 0.0
+    assert config.monitor.retry_max_backoff_seconds == 0.0
 
 
 def test_explicit_missing_config_fails_with_safe_path(tmp_path: Path) -> None:
@@ -146,6 +149,9 @@ def test_environment_parsing_and_errors_are_redacted(tmp_path: Path) -> None:
             "TIDEMARK_RETENTION_DIR": str(tmp_path / "retained"),
             "TIDEMARK_MONITOR_STREAM_TYPE": "hls",
             "TIDEMARK_MONITOR_TIMEOUT_SECONDS": "3.25",
+            "TIDEMARK_MONITOR_RETRY_ATTEMPTS": "4",
+            "TIDEMARK_MONITOR_RETRY_INITIAL_BACKOFF_SECONDS": "1.5",
+            "TIDEMARK_MONITOR_RETRY_MAX_BACKOFF_SECONDS": "9.5",
             "TIDEMARK_INGEST_FINGERPRINT": "yes",
             "TIDEMARK_LOOKUP_TIMEOUT_SECONDS": "7",
             "ACOUSTID_API_KEY": "env-secret-key",
@@ -155,6 +161,9 @@ def test_environment_parsing_and_errors_are_redacted(tmp_path: Path) -> None:
     assert config.paths.db == Path("~/env.db").expanduser()
     assert config.monitor.stream_type == "hls"
     assert config.monitor.timeout_seconds == 3.25
+    assert config.monitor.retry_attempts == 4
+    assert config.monitor.retry_initial_backoff_seconds == 1.5
+    assert config.monitor.retry_max_backoff_seconds == 9.5
     assert config.ingest.fingerprint is True
     assert config.fingerprint.lookup_timeout_seconds == 7.0
     assert config.fingerprint.api_key == "env-secret-key"
@@ -176,6 +185,9 @@ db = "config.db"
 [monitor]
 stream_type = "icecast"
 timeout_seconds = 12
+retry_attempts = 2
+retry_initial_backoff_seconds = 1
+retry_max_backoff_seconds = 10
 
 [search]
 context_seconds = 2
@@ -184,15 +196,26 @@ context_seconds = 2
     config = load_config(
         path,
         explicit=True,
-        env={"TIDEMARK_DB": "env.db", "TIDEMARK_MONITOR_TIMEOUT_SECONDS": "8"},
+        env={
+            "TIDEMARK_DB": "env.db",
+            "TIDEMARK_MONITOR_TIMEOUT_SECONDS": "8",
+            "TIDEMARK_MONITOR_RETRY_ATTEMPTS": "5",
+            "TIDEMARK_MONITOR_RETRY_INITIAL_BACKOFF_SECONDS": "2.5",
+        },
     )
 
-    monitor = resolve_monitor_options(config, MonitorOverrides(stream_type="udp"))
+    monitor = resolve_monitor_options(
+        config,
+        MonitorOverrides(stream_type="udp", retry_max_backoff_seconds=20.0),
+    )
     search = resolve_search_options(config, SearchOverrides(context_seconds=11.0))
 
     assert monitor.db_path == Path("env.db")
     assert monitor.stream_type == "udp"
     assert monitor.timeout_seconds == 8.0
+    assert monitor.retry_attempts == 5
+    assert monitor.retry_initial_backoff_seconds == 2.5
+    assert monitor.retry_max_backoff_seconds == 20.0
     assert search.db_path == Path("env.db")
     assert search.context_seconds == 11.0
 
@@ -241,6 +264,67 @@ def test_redaction_masks_api_keys_urls_and_private_paths(tmp_path: Path) -> None
     redacted_path = redact_value("paths.db", raw_path)
     assert redacted_path == "[redacted-path]"
     assert raw_path not in redacted_path
+
+
+def test_monitor_retry_config_values_are_resolved_from_toml(tmp_path: Path) -> None:
+    path = write_config(
+        tmp_path,
+        """
+[monitor]
+retry_attempts = 3
+retry_initial_backoff_seconds = 0.5
+retry_max_backoff_seconds = 8
+""".strip(),
+    )
+
+    config = load_config(path, explicit=True, env={})
+    monitor = resolve_monitor_options(config)
+
+    assert monitor.retry_attempts == 3
+    assert monitor.retry_initial_backoff_seconds == 0.5
+    assert monitor.retry_max_backoff_seconds == 8.0
+
+
+@pytest.mark.parametrize(
+    ("body", "field"),
+    [
+        ("[monitor]\nretry_attempts = -1\n", "monitor.retry_attempts"),
+        ("[monitor]\nretry_attempts = true\n", "monitor.retry_attempts"),
+        ("[monitor]\nretry_initial_backoff_seconds = -0.1\n", "monitor.retry_initial_backoff_seconds"),
+        ("[monitor]\nretry_initial_backoff_seconds = nan\n", "monitor.retry_initial_backoff_seconds"),
+        ("[monitor]\nretry_max_backoff_seconds = -0.1\n", "monitor.retry_max_backoff_seconds"),
+        ("[monitor]\nretry_max_backoff_seconds = nan\n", "monitor.retry_max_backoff_seconds"),
+    ],
+)
+def test_invalid_monitor_retry_config_values_fail_with_field_paths(tmp_path: Path, body: str, field: str) -> None:
+    path = write_config(tmp_path, body)
+
+    with pytest.raises(ConfigError) as caught:
+        load_config(path, explicit=True, env={})
+
+    message = str(caught.value)
+    assert field in message
+    assert "field=monitor." in message
+
+
+@pytest.mark.parametrize(
+    ("env", "field"),
+    [
+        ({"TIDEMARK_MONITOR_RETRY_ATTEMPTS": "-1"}, "monitor.retry_attempts"),
+        ({"TIDEMARK_MONITOR_RETRY_ATTEMPTS": "true"}, "monitor.retry_attempts"),
+        ({"TIDEMARK_MONITOR_RETRY_INITIAL_BACKOFF_SECONDS": "-0.1"}, "monitor.retry_initial_backoff_seconds"),
+        ({"TIDEMARK_MONITOR_RETRY_INITIAL_BACKOFF_SECONDS": "nan"}, "monitor.retry_initial_backoff_seconds"),
+        ({"TIDEMARK_MONITOR_RETRY_MAX_BACKOFF_SECONDS": "-0.1"}, "monitor.retry_max_backoff_seconds"),
+        ({"TIDEMARK_MONITOR_RETRY_MAX_BACKOFF_SECONDS": "nan"}, "monitor.retry_max_backoff_seconds"),
+    ],
+)
+def test_invalid_monitor_retry_env_values_fail_with_field_paths(env: dict[str, str], field: str) -> None:
+    with pytest.raises(ConfigError) as caught:
+        load_config(env=env)
+
+    message = str(caught.value)
+    assert field in message
+    assert next(iter(env)) in message
 
 
 def test_public_config_api_has_no_typer_dependency() -> None:

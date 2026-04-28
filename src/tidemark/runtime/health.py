@@ -128,11 +128,21 @@ def _looks_like_path(text: str, path: Path) -> bool:
 
 @dataclass(frozen=True)
 class RetryState:
-    """Placeholder retry state reserved for later retry-aware slices."""
+    """Retry scheduling state for status/observability surfaces."""
 
     attempt: int = 0
     next_retry_at: datetime | None = None
     last_retry_error: str | None = None
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.attempt, int) or isinstance(self.attempt, bool) or self.attempt < 0:
+            raise ValueError("retry.attempt must be a non-negative integer")
+        if self.next_retry_at is not None and not isinstance(self.next_retry_at, datetime):
+            raise ValueError("retry.next_retry_at must be a datetime")
+        if self.next_retry_at is not None:
+            object.__setattr__(self, "next_retry_at", _as_utc(self.next_retry_at))
+        if self.last_retry_error is not None:
+            object.__setattr__(self, "last_retry_error", redact_source_label(self.last_retry_error))
 
     def to_json_dict(self) -> dict[str, object]:
         return {
@@ -318,6 +328,30 @@ class HealthReporter:
             phase=phase or self.record.phase,
             counters=_merge_counters(self.record.counters, counters),
             last_error=redact_source_label(last_error) if last_error is not None else self.record.last_error,
+        )
+        return self._write()
+
+    def retry(
+        self,
+        *,
+        attempt: int,
+        next_retry_at: datetime,
+        error: object,
+        phase: str = "retrying",
+        counters: dict[str, int | float] | None = None,
+    ) -> WriteResult:
+        self.record = replace(
+            self.record,
+            heartbeat_at=_as_utc(self.now()),
+            phase=phase,
+            counters=_merge_counters(self.record.counters, counters),
+            retry=RetryState(
+                attempt=attempt,
+                next_retry_at=next_retry_at,
+                last_retry_error=redact_source_label(error),
+            ),
+            terminal=False,
+            terminal_reason=None,
         )
         return self._write()
 
