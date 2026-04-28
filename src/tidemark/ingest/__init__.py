@@ -15,6 +15,7 @@ from tidemark.ingest.icy import (
     parse_icy_metadata,
     sanitize_icy_metadata,
 )
+from tidemark.ingest.mpegts import iter_mpegts_scte35_markers
 
 __all__ = [
     "DEFAULT_META_INT",
@@ -25,6 +26,7 @@ __all__ = [
     "iter_hls_manifest_id3_markers",
     "iter_hls_manifest_scte35_markers",
     "iter_icy_markers",
+    "iter_mpegts_scte35_markers",
     "parse_hls_scte35_tag",
     "parse_icy_metadata",
     "sanitize_icy_metadata",
