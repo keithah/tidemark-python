@@ -128,15 +128,19 @@ def run_ingest_command(
 
     final_counters = _result_counters(result)
     _report_finish(reporter, counters=final_counters)
+    counters = _result_counters(result)
     output = (
         "Ingest complete: "
-        f"segments={len(result.segment_ids)} "
-        f"words={len(result.transcript_word_ids)} "
-        f"markers={len(result.ad_event_ids)} "
+        f"segments={counters['segments']} "
+        f"processed={counters['processed']} "
+        f"skipped={counters['skipped']} "
+        f"failed={counters['failed']} "
+        f"words={counters['words']} "
+        f"markers={counters['markers']} "
     )
     if resolved.fingerprint:
-        output += f"retained={len(result.retained_audio_ids)} songs={len(result.song_ids)} "
-    output += f"issues={len(result.issues)}"
+        output += f"retained={counters['retained']} songs={counters['songs']} "
+    output += f"issues={counters['issues']}"
     typer.echo(output)
 
 
@@ -162,12 +166,25 @@ def ingest(
 
 
 def _empty_counters() -> dict[str, int]:
-    return {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}
+    return {
+        "segments": 0,
+        "processed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "words": 0,
+        "markers": 0,
+        "issues": 0,
+        "retained": 0,
+        "songs": 0,
+    }
 
 
 def _result_counters(result: IngestPipelineResult) -> dict[str, int]:
     return {
-        "segments": len(result.segment_ids),
+        "segments": len(result.segment_ids) + len(result.skipped_segment_ids),
+        "processed": len(result.segment_ids),
+        "skipped": len(result.skipped_segment_ids),
+        "failed": len(result.issues),
         "words": len(result.transcript_word_ids),
         "markers": len(result.ad_event_ids),
         "issues": len(result.issues),

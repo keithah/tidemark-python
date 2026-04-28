@@ -110,7 +110,17 @@ def patch_ingest(monkeypatch: pytest.MonkeyPatch, result: IngestPipelineResult) 
             progress_callback(
                 IngestPipelineProgress(
                     phase="running",
-                    counters={"segments": 1, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0},
+                    counters={
+                        "segments": 1,
+                        "processed": 1,
+                        "skipped": 0,
+                        "failed": 0,
+                        "words": 0,
+                        "markers": 0,
+                        "issues": 0,
+                        "retained": 0,
+                        "songs": 0,
+                    },
                 )
             )
         return result
@@ -134,6 +144,31 @@ class RecordingReporter:
 
     def fail(self, error: object, **kwargs: object) -> None:
         self.events.append(("fail", {"error": error, **kwargs}))
+
+
+_EMPTY_COUNTERS = {
+    "segments": 0,
+    "processed": 0,
+    "skipped": 0,
+    "failed": 0,
+    "words": 0,
+    "markers": 0,
+    "issues": 0,
+    "retained": 0,
+    "songs": 0,
+}
+
+_RUNNING_COUNTERS = {
+    "segments": 1,
+    "processed": 1,
+    "skipped": 0,
+    "failed": 0,
+    "words": 0,
+    "markers": 0,
+    "issues": 0,
+    "retained": 0,
+    "songs": 0,
+}
 
 
 def test_ingest_command_creates_reporter_and_records_progress_and_final_counts(
@@ -182,7 +217,7 @@ def test_ingest_command_creates_reporter_and_records_progress_and_final_counts(
     )
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=2 markers=1 retained=1 songs=1 issues=1\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=1 words=2 markers=1 retained=1 songs=1 issues=1\n"
     assert result.stderr == ""
     assert len(calls) == 1
     assert calls[0].progress_callback_present is True
@@ -194,9 +229,9 @@ def test_ingest_command_creates_reporter_and_records_progress_and_final_counts(
         }
     ]
     assert events == [
-        ("start", {"phase": "setup", "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
-        ("update", {"phase": "running", "counters": {"segments": 1, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
-        ("finish", {"phase": "completed", "reason": "finished", "counters": {"segments": 1, "words": 2, "markers": 1, "issues": 1, "retained": 1, "songs": 1}}),
+        ("start", {"phase": "setup", "counters": _EMPTY_COUNTERS}),
+        ("update", {"phase": "running", "counters": _RUNNING_COUNTERS}),
+        ("finish", {"phase": "completed", "reason": "finished", "counters": {"segments": 1, "processed": 1, "skipped": 0, "failed": 1, "words": 2, "markers": 1, "issues": 1, "retained": 1, "songs": 1}}),
     ]
 
 
@@ -226,7 +261,7 @@ def test_ingest_reporter_failures_do_not_change_success_output(monkeypatch: pyte
     result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript)])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=1 markers=0 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=1 markers=0 issues=0\n"
     assert result.stderr == ""
 
 
@@ -261,14 +296,14 @@ def test_ingest_command_records_pipeline_failure_without_changing_fatal_stderr(
     assert "private" not in result.stderr
     assert "token=secret" not in result.stderr
     assert events == [
-        ("start", {"phase": "setup", "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
+        ("start", {"phase": "setup", "counters": _EMPTY_COUNTERS}),
         (
             "fail",
             {
                 "error": "pipeline failed for /tmp/private/source.m3u8 token=secret",
                 "phase": "error",
                 "reason": "pipeline_error",
-                "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0},
+                "counters": _EMPTY_COUNTERS,
             },
         ),
     ]
@@ -290,14 +325,14 @@ def test_ingest_command_records_fixture_validation_failure_when_reporter_exists(
     assert "[tidemark] error: start_offset" in result.stderr
     assert "private transcript" not in result.stderr
     assert events == [
-        ("start", {"phase": "setup", "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}}),
+        ("start", {"phase": "setup", "counters": _EMPTY_COUNTERS}),
         (
             "fail",
             {
                 "error": "start_offset must be >= 0",
                 "phase": "error",
                 "reason": "fixture_error",
-                "counters": {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0},
+                "counters": _EMPTY_COUNTERS,
             },
         ),
     ]
@@ -326,7 +361,7 @@ def test_ingest_command_delegates_once_and_prints_safe_counts(monkeypatch: pytes
     )
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=3 markers=1 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=3 markers=1 issues=0\n"
     assert result.stderr == ""
     assert calls == [
         IngestCall(
@@ -373,7 +408,7 @@ def test_fingerprint_output_includes_retained_and_song_counts(monkeypatch: pytes
     result = invoke(["ingest", str(source), "--fingerprint"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=2 words=0 markers=1 retained=2 songs=1 issues=1\n"
+    assert result.stdout == "Ingest complete: segments=2 processed=2 skipped=0 failed=1 words=0 markers=1 retained=2 songs=1 issues=1\n"
     assert result.stderr == ""
     assert len(calls) == 1
     assert calls[0].transcriber_is_none is True
@@ -397,7 +432,7 @@ def test_fingerprint_ingest_without_fixture_delegates_with_no_transcriber(
     result = invoke(["ingest", str(source), "--fingerprint"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=0 markers=0 retained=0 songs=0 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=0 markers=0 retained=0 songs=0 issues=0\n"
     assert calls == [
         IngestCall(
             source=source,
@@ -429,7 +464,7 @@ def test_fingerprint_ingest_with_fixture_delegates_with_deterministic_transcribe
     result = invoke(["ingest", str(source), "--fingerprint", "--fixture-transcript", str(transcript)])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=1 markers=0 retained=0 songs=0 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=1 markers=0 retained=0 songs=0 issues=0\n"
     assert len(calls) == 1
     assert calls[0].transcriber_is_none is False
     assert calls[0].fixture_words == (
@@ -460,7 +495,7 @@ def test_ingest_reports_recoverable_pipeline_issues_as_counts_only(
     result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript)])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=0 markers=1 issues=2\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=2 words=0 markers=1 issues=2\n"
     assert result.stderr == ""
     assert len(calls) == 1
     assert calls[0].fingerprint is False
@@ -477,7 +512,7 @@ def test_no_markers_disables_manifest_marker_persistence(monkeypatch: pytest.Mon
     result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript), "--no-markers"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=1 markers=0 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=1 markers=0 issues=0\n"
     assert calls[0].include_manifest_markers is False
     assert calls[0].fingerprint is False
 
@@ -493,7 +528,7 @@ def test_markers_option_enables_manifest_marker_persistence(monkeypatch: pytest.
     result = invoke(["ingest", str(source), "--fixture-transcript", str(transcript), "--markers"])
 
     assert result.exit_code == 0, result.output
-    assert result.stdout == "Ingest complete: segments=1 words=1 markers=1 issues=0\n"
+    assert result.stdout == "Ingest complete: segments=1 processed=1 skipped=0 failed=0 words=1 markers=1 issues=0\n"
     assert calls[0].include_manifest_markers is True
 
 

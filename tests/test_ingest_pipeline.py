@@ -193,8 +193,28 @@ def test_ingest_source_to_db_reports_progress_with_compact_redacted_counters(tmp
 
     assert result.issues == ()
     assert [event.phase for event in events] == ["resolving", "running", "completed"]
-    assert events[0].counters == {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}
-    assert events[1].counters == {"segments": 1, "words": 2, "markers": 1, "issues": 0, "retained": 1, "songs": 1}
+    assert events[0].counters == {
+        "segments": 0,
+        "processed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "words": 0,
+        "markers": 0,
+        "issues": 0,
+        "retained": 0,
+        "songs": 0,
+    }
+    assert events[1].counters == {
+        "segments": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "words": 2,
+        "markers": 1,
+        "issues": 0,
+        "retained": 1,
+        "songs": 1,
+    }
     assert events[-1].counters == events[1].counters
     serialized_events = json.dumps(
         [{"phase": event.phase, "counters": event.counters, "error": event.error} for event in events],
@@ -208,6 +228,183 @@ def test_ingest_source_to_db_reports_progress_with_compact_redacted_counters(tmp
         str(tmp_path),
     ):
         assert secret not in serialized_events
+
+
+def test_restart_ingest_skips_duplicate_segment_without_downstream_work(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "playlist.m3u8", media_path.name)
+    db_path = tmp_path / "tidemark.sqlite3"
+    source_url = "fixture://integration/source.m3u8?token=secret"
+    first_events: list[IngestPipelineProgress] = []
+
+    first_result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        fingerprint=True,
+        fingerprint_backend=_fingerprint_backend,
+        lookup_adapter=_lookup_adapter,
+        source_url=source_url,
+        progress_callback=first_events.append,
+    )
+
+    assert len(first_result.segment_ids) == 1
+    assert first_result.skipped_segment_ids == ()
+    assert first_result.issues == ()
+    assert first_events[-1].counters == {
+        "segments": 1,
+        "processed": 1,
+        "skipped": 0,
+        "failed": 0,
+        "words": 1,
+        "markers": 1,
+        "issues": 0,
+        "retained": 1,
+        "songs": 1,
+    }
+    counts_after_first = {table: _fetch_count(db_path, table) for table in _timeline_tables()}
+
+    def fail_decode(_segment: object) -> object:
+        raise AssertionError("duplicate skip path must not decode audio")
+
+    def fail_fingerprint_backend(_sample_rate: int, _channels: int, _pcmiter: Iterable[bytes]) -> str:
+        raise AssertionError("duplicate skip path must not fingerprint audio")
+
+    def fail_lookup_adapter(
+        _fingerprint: AudioFingerprint,
+        *,
+        api_key: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> AcoustIDLookupResult:
+        raise AssertionError("duplicate skip path must not lookup fingerprints")
+
+    class FailTranscriber:
+        def transcribe(self, _chunk: object) -> object:
+            raise AssertionError("duplicate skip path must not transcribe audio")
+
+    monkeypatch.setattr("tidemark.audio.decode_segment_audio", fail_decode)
+    restart_events: list[IngestPipelineProgress] = []
+
+    restart_result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=FailTranscriber(),  # type: ignore[arg-type]
+        fingerprint=True,
+        fingerprint_backend=fail_fingerprint_backend,
+        lookup_adapter=fail_lookup_adapter,
+        source_url=source_url,
+        progress_callback=restart_events.append,
+    )
+
+    assert restart_result.segment_ids == ()
+    assert restart_result.skipped_segment_ids == first_result.segment_ids
+    assert restart_result.transcript_word_ids == ()
+    assert restart_result.ad_event_ids == ()
+    assert restart_result.retained_audio_ids == ()
+    assert restart_result.song_ids == ()
+    assert restart_result.issues == ()
+    assert {table: _fetch_count(db_path, table) for table in _timeline_tables()} == counts_after_first
+    assert restart_events[-1].counters == {
+        "segments": 1,
+        "processed": 0,
+        "skipped": 1,
+        "failed": 0,
+        "words": 0,
+        "markers": 0,
+        "issues": 0,
+        "retained": 0,
+        "songs": 0,
+    }
+
+
+def test_restart_ingest_processes_sha_mismatch_as_new_work(tmp_path: Path) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "playlist.m3u8", media_path.name, include_cue=False)
+    db_path = tmp_path / "tidemark.sqlite3"
+    source_url = "fixture://integration/source.m3u8"
+
+    first_result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        source_url=source_url,
+        include_manifest_markers=False,
+    )
+    _make_tiny_wav(media_path)
+    media_path.write_bytes(media_path.read_bytes() + b"changed")
+
+    second_result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        source_url=source_url,
+        include_manifest_markers=False,
+    )
+
+    assert len(first_result.segment_ids) == 1
+    assert len(second_result.segment_ids) == 1
+    assert second_result.skipped_segment_ids == ()
+    assert _fetch_count(db_path, "segments") == 2
+    assert _fetch_count(db_path, "transcript_words") == 2
+
+
+def test_restart_ingest_processes_source_mismatch_as_new_work(tmp_path: Path) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "playlist.m3u8", media_path.name, include_cue=False)
+    db_path = tmp_path / "tidemark.sqlite3"
+
+    ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        source_url="fixture://integration/source-a.m3u8",
+        include_manifest_markers=False,
+    )
+    second_result = ingest_source_to_db(
+        manifest,
+        db_path=db_path,
+        transcriber=DeterministicTranscriber([("hello", 0.0, 0.1, None)]),
+        source_url="fixture://integration/source-b.m3u8",
+        include_manifest_markers=False,
+    )
+
+    assert len(second_result.segment_ids) == 1
+    assert second_result.skipped_segment_ids == ()
+    assert _fetch_count(db_path, "segments") == 2
+    assert _fetch_count(db_path, "transcript_words") == 2
+
+
+def test_restart_evidence_lookup_failure_aborts_with_redacted_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    media_path = _make_tiny_wav(tmp_path / "segment37.wav")
+    manifest = _write_manifest(tmp_path / "private-playlist.m3u8", media_path.name, include_cue=False)
+    db_path = tmp_path / "tidemark.sqlite3"
+
+    def fail_lookup(**_kwargs: object) -> object:
+        raise RuntimeError("sqlite exploded /private/path token=secret raw fingerprint")
+
+    monkeypatch.setattr("tidemark.store.find_segment_by_restart_evidence", fail_lookup)
+
+    with pytest.raises(RuntimeError, match="pipeline segment restart lookup failed") as exc_info:
+        ingest_source_to_db(
+            manifest,
+            db_path=db_path,
+            transcriber=DeterministicTranscriber([("private phrase", 0.0, 0.1, None)]),
+            source_url="https://example.test/private/live.m3u8?token=secret",
+            include_manifest_markers=False,
+        )
+
+    error_message = str(exc_info.value)
+    for secret in ("token=secret", "private phrase", "/private/path", "raw fingerprint"):
+        assert secret not in error_message
+    assert _fetch_count(db_path, "segments") == 0
+
+
+
+def _timeline_tables() -> tuple[str, ...]:
+    return ("segments", "transcript_words", "ad_events", "retained_audio", "songs")
+
 
 
 def test_ingest_progress_callback_failures_do_not_change_pipeline_result(tmp_path: Path) -> None:

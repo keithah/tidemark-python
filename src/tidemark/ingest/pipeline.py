@@ -46,6 +46,7 @@ class IngestPipelineResult:
     transcript_word_ids: tuple[int, ...]
     ad_event_ids: tuple[int, ...]
     issues: tuple[IngestIssue, ...]
+    skipped_segment_ids: tuple[int, ...] = ()
     retained_audio_ids: tuple[int, ...] = ()
     song_ids: tuple[int, ...] = ()
 
@@ -102,18 +103,43 @@ def ingest_source_to_db(
     conn = initialize_db(db_path)
     try:
         segment_ids: list[int] = []
+        skipped_segment_ids: list[int] = []
         transcript_word_ids: list[int] = []
         retained_audio_ids: list[int] = []
         song_ids: list[int] = []
-        ad_event_ids = _insert_manifest_markers(
-            conn,
-            source,
-            source_url=source_url,
-            include_manifest_markers=include_manifest_markers,
-        )
+        ad_event_ids: list[int] = []
+        manifest_markers_inserted = False
         issues: list[IngestIssue] = []
 
         for segment in segments:
+            existing_segment_id = _find_restart_segment_id(conn, segment)
+            if existing_segment_id is not None:
+                skipped_segment_ids.append(existing_segment_id)
+                _notify_progress(
+                    progress_callback,
+                    "running",
+                    _progress_counters(
+                        total_segments=len(segments),
+                        segment_ids=segment_ids,
+                        skipped_segment_ids=skipped_segment_ids,
+                        transcript_word_ids=transcript_word_ids,
+                        ad_event_ids=ad_event_ids,
+                        issues=issues,
+                        retained_audio_ids=retained_audio_ids,
+                        song_ids=song_ids,
+                    ),
+                )
+                continue
+
+            if not manifest_markers_inserted:
+                ad_event_ids = _insert_manifest_markers(
+                    conn,
+                    source,
+                    source_url=source_url,
+                    include_manifest_markers=include_manifest_markers,
+                )
+                manifest_markers_inserted = True
+
             segment_id = _insert_segment(conn, segment)
             segment_ids.append(segment_id)
 
@@ -167,7 +193,9 @@ def ingest_source_to_db(
                 progress_callback,
                 "running",
                 _progress_counters(
+                    total_segments=len(segments),
                     segment_ids=segment_ids,
+                    skipped_segment_ids=skipped_segment_ids,
                     transcript_word_ids=transcript_word_ids,
                     ad_event_ids=ad_event_ids,
                     issues=issues,
@@ -181,6 +209,7 @@ def ingest_source_to_db(
             transcript_word_ids=tuple(transcript_word_ids),
             ad_event_ids=tuple(ad_event_ids),
             issues=tuple(issues),
+            skipped_segment_ids=tuple(skipped_segment_ids),
             retained_audio_ids=tuple(retained_audio_ids),
             song_ids=tuple(song_ids),
         )
@@ -191,12 +220,24 @@ def ingest_source_to_db(
 
 
 def _empty_progress_counters() -> dict[str, int]:
-    return {"segments": 0, "words": 0, "markers": 0, "issues": 0, "retained": 0, "songs": 0}
+    return {
+        "segments": 0,
+        "processed": 0,
+        "skipped": 0,
+        "failed": 0,
+        "words": 0,
+        "markers": 0,
+        "issues": 0,
+        "retained": 0,
+        "songs": 0,
+    }
 
 
 def _progress_counters(
     *,
+    total_segments: int,
     segment_ids: list[int],
+    skipped_segment_ids: list[int],
     transcript_word_ids: list[int],
     ad_event_ids: list[int],
     issues: list[IngestIssue],
@@ -204,7 +245,10 @@ def _progress_counters(
     song_ids: list[int],
 ) -> dict[str, int]:
     return {
-        "segments": len(segment_ids),
+        "segments": total_segments,
+        "processed": len(segment_ids),
+        "skipped": len(skipped_segment_ids),
+        "failed": len(issues),
         "words": len(transcript_word_ids),
         "markers": len(ad_event_ids),
         "issues": len(issues),
@@ -215,7 +259,10 @@ def _progress_counters(
 
 def _result_counters(result: IngestPipelineResult) -> dict[str, int]:
     return {
-        "segments": len(result.segment_ids),
+        "segments": len(result.segment_ids) + len(result.skipped_segment_ids),
+        "processed": len(result.segment_ids),
+        "skipped": len(result.skipped_segment_ids),
+        "failed": len(result.issues),
         "words": len(result.transcript_word_ids),
         "markers": len(result.ad_event_ids),
         "issues": len(result.issues),
@@ -270,6 +317,24 @@ def _fixture_number(value: object, field: str) -> float:
     if not isinstance(value, Real) or isinstance(value, bool):
         raise TranscriptFixtureError(f"{field} must be numeric")
     return float(value)
+
+
+def _find_restart_segment_id(conn: Any, segment: SegmentRecord) -> int | None:
+    try:
+        from tidemark.store import find_segment_by_restart_evidence
+
+        existing = find_segment_by_restart_evidence(
+            conn,
+            source_url=segment.source_url,
+            sequence=segment.sequence,
+            sha256=segment.sha256,
+            byte_length=segment.byte_length,
+        )
+    except Exception as exc:
+        raise RuntimeError("pipeline segment restart lookup failed") from exc
+    if existing is None:
+        return None
+    return existing.id
 
 
 def _insert_segment(conn: Any, segment: SegmentRecord) -> int:
