@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import importlib
+import os
 import sqlite3
 from numbers import Real
 from typing import Any, Protocol
@@ -31,6 +33,103 @@ class AcoustIDLookupAdapter(Protocol):
         timeout_seconds: float | None = None,
     ) -> AcoustIDLookupResult:
         """Return normalized lookup evidence for one fingerprint."""
+
+
+class PyAcoustIDLookupAdapter:
+    """Lazy pyacoustid-backed lookup adapter with redacted failures."""
+
+    def __call__(
+        self,
+        fingerprint: AudioFingerprint,
+        *,
+        api_key: str | None = None,
+        timeout_seconds: float | None = None,
+    ) -> AcoustIDLookupResult:
+        """Call pyacoustid lookup only when a cache miss reaches this boundary."""
+        if not isinstance(fingerprint, AudioFingerprint):
+            raise TypeError("PyAcoustIDLookupAdapter fingerprint must be an AudioFingerprint")
+        if not isinstance(fingerprint.duration_seconds, Real) or isinstance(fingerprint.duration_seconds, bool):
+            raise AcoustIDLookupError(
+                phase="validation",
+                status="invalid_duration",
+                sequence=fingerprint.segment_sequence,
+                detail="duration must be positive",
+            )
+        if float(fingerprint.duration_seconds) <= 0:
+            raise AcoustIDLookupError(
+                phase="validation",
+                status="invalid_duration",
+                sequence=fingerprint.segment_sequence,
+                detail="duration must be positive",
+            )
+
+        resolved_key = api_key if api_key is not None else os.environ.get("ACOUSTID_API_KEY")
+        if not isinstance(resolved_key, str) or not resolved_key.strip():
+            raise AcoustIDLookupError(
+                phase="auth",
+                status="missing_key",
+                sequence=fingerprint.segment_sequence,
+                detail="API key unavailable",
+            )
+
+        try:
+            acoustid = importlib.import_module("acoustid")
+        except Exception as exc:
+            raise AcoustIDLookupError(
+                phase="dependency",
+                status="unavailable",
+                sequence=fingerprint.segment_sequence,
+                detail="acoustid unavailable",
+                cause=exc,
+            ) from exc
+
+        try:
+            response = acoustid.lookup(  # type: ignore[attr-defined]
+                resolved_key.strip(),
+                fingerprint.fingerprint,
+                fingerprint.duration_seconds,
+                meta=["recordings", "releases"],
+                timeout=timeout_seconds,
+            )
+        except TimeoutError as exc:
+            raise AcoustIDLookupError(
+                phase="timeout",
+                status="timeout",
+                sequence=fingerprint.segment_sequence,
+                detail="service lookup timed out",
+                cause=exc,
+            ) from exc
+        except Exception as exc:
+            web_service_error = getattr(acoustid, "WebServiceError", None)
+            if web_service_error is not None and isinstance(exc, web_service_error):
+                raise AcoustIDLookupError(
+                    phase="service",
+                    status="web_service_error",
+                    sequence=fingerprint.segment_sequence,
+                    detail="service lookup failed",
+                    cause=exc,
+                ) from exc
+            if isinstance(exc, OSError):
+                raise AcoustIDLookupError(
+                    phase="service",
+                    status="network_error",
+                    sequence=fingerprint.segment_sequence,
+                    detail="service lookup failed",
+                    cause=exc,
+                ) from exc
+            raise AcoustIDLookupError(
+                phase="service",
+                status="error",
+                sequence=fingerprint.segment_sequence,
+                detail="service lookup failed",
+                cause=exc,
+            ) from exc
+
+        return normalize_acoustid_lookup_response(
+            response,
+            lookup_source="acoustid",
+            sequence=fingerprint.segment_sequence,
+        )
 
 
 def identify_fingerprint(

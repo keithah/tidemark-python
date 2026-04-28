@@ -193,6 +193,26 @@ def test_fingerprint_audio_chunk_wraps_backend_exceptions_without_private_values
     assert "Users/alice" not in message
 
 
+def test_fingerprint_package_imports_without_acoustid_module() -> None:
+    script = """
+import sys
+sys.modules['acoustid'] = None
+from tidemark.fingerprint import PyAcoustIDLookupAdapter, identify_fingerprint
+assert PyAcoustIDLookupAdapter is not None
+assert identify_fingerprint is not None
+"""
+
+    completed = subprocess.run(
+        [sys.executable, "-c", script],
+        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+
+    assert completed.returncode == 0, completed.stderr
+
+
 def test_default_backend_import_is_lazy_and_missing_dependency_is_redacted(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setitem(sys.modules, "acoustid", None)
 

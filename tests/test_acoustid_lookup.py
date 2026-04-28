@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import sqlite3
+import sys
+from types import ModuleType
 
 import pytest
 
@@ -8,6 +10,7 @@ from tidemark.fingerprint import (
     AcoustIDLookupError,
     AcoustIDLookupResult,
     AudioFingerprint,
+    PyAcoustIDLookupAdapter,
     identify_fingerprint,
     normalize_acoustid_lookup_response,
 )
@@ -428,3 +431,250 @@ def test_acoustid_lookup_error_is_redacted_and_exposes_stable_context() -> None:
     assert str(err) == "AcoustID lookup error during backend at sequence 21: timeout backend failed"
     for secret in RAW_SECRET_VALUES:
         assert secret not in str(err)
+
+
+def test_pyacoustid_lookup_adapter_imports_dependency_lazily_and_normalizes_success(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[tuple[str, str, float, list[str], float | None]] = []
+    module = ModuleType("acoustid")
+
+    class WebServiceError(Exception):
+        pass
+
+    def lookup(
+        api_key: str,
+        fingerprint: str,
+        duration: float,
+        *,
+        meta: list[str],
+        timeout: float | None,
+    ) -> dict[str, object]:
+        calls.append((api_key, fingerprint, duration, meta, timeout))
+        return _successful_response()
+
+    module.WebServiceError = WebServiceError  # type: ignore[attr-defined]
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+    monkeypatch.delenv("ACOUSTID_API_KEY", raising=False)
+
+    result = PyAcoustIDLookupAdapter()(
+        _fingerprint(value="RAW-FINGERPRINT-SECRET", duration_seconds=8.5),
+        api_key="sk_live_secret_key",
+        timeout_seconds=3.25,
+    )
+
+    assert result.lookup_source == "acoustid"
+    assert result.acoustid_id == "best-acoustid"
+    assert result.recording_id == "best-recording"
+    assert result.score == pytest.approx(0.91)
+    assert calls == [
+        (
+            "sk_live_secret_key",
+            "RAW-FINGERPRINT-SECRET",
+            8.5,
+            ["recordings", "releases"],
+            3.25,
+        )
+    ]
+
+
+def test_pyacoustid_lookup_adapter_reads_env_key_only_when_called(monkeypatch: pytest.MonkeyPatch) -> None:
+    calls: list[str] = []
+    module = ModuleType("acoustid")
+
+    def lookup(api_key: str, *_args: object, **_kwargs: object) -> dict[str, object]:
+        calls.append(api_key)
+        return {"status": "ok", "results": []}
+
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+    monkeypatch.setenv("ACOUSTID_API_KEY", "sk_live_secret_key")
+
+    result = PyAcoustIDLookupAdapter()(_fingerprint(), timeout_seconds=None)
+
+    assert calls == ["sk_live_secret_key"]
+    assert result.raw_status == "no_match"
+    assert result.lookup_source == "acoustid"
+
+
+@pytest.mark.parametrize("api_key", [None, "", "   "])
+def test_pyacoustid_lookup_adapter_rejects_missing_or_blank_key_before_import(
+    api_key: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.delenv("ACOUSTID_API_KEY", raising=False)
+    monkeypatch.setitem(sys.modules, "acoustid", None)
+
+    with pytest.raises(AcoustIDLookupError) as excinfo:
+        PyAcoustIDLookupAdapter()(_fingerprint(value="RAW-FINGERPRINT-SECRET"), api_key=api_key)
+
+    assert excinfo.value.phase == "auth"
+    assert excinfo.value.status == "missing_key"
+    assert excinfo.value.sequence == 7
+    message = str(excinfo.value)
+    assert "API key unavailable" in message
+    for secret in RAW_SECRET_VALUES:
+        assert secret not in message
+
+
+def test_pyacoustid_lookup_adapter_rejects_invalid_duration_before_network(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = ModuleType("acoustid")
+
+    def lookup(*_args: object, **_kwargs: object) -> dict[str, object]:  # pragma: no cover - must not run
+        raise AssertionError("lookup should not be called")
+
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+
+    with pytest.raises(AcoustIDLookupError) as excinfo:
+        PyAcoustIDLookupAdapter()(_fingerprint(duration_seconds=0), api_key="sk_live_secret_key")
+
+    assert excinfo.value.phase == "validation"
+    assert excinfo.value.status == "invalid_duration"
+    assert "duration" in str(excinfo.value)
+    assert "sk_live_secret_key" not in str(excinfo.value)
+
+
+def test_pyacoustid_lookup_adapter_reports_missing_dependency_without_secret_values(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("ACOUSTID_API_KEY", "sk_live_secret_key")
+    monkeypatch.setitem(sys.modules, "acoustid", None)
+
+    with pytest.raises(AcoustIDLookupError) as excinfo:
+        PyAcoustIDLookupAdapter()(_fingerprint(value="RAW-FINGERPRINT-SECRET"))
+
+    assert excinfo.value.phase == "dependency"
+    assert excinfo.value.status == "unavailable"
+    assert excinfo.value.sequence == 7
+    message = str(excinfo.value)
+    assert "acoustid unavailable" in message
+    for secret in RAW_SECRET_VALUES:
+        assert secret not in message
+
+
+def test_pyacoustid_lookup_adapter_wraps_web_service_errors_without_backend_text(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("acoustid")
+
+    class WebServiceError(Exception):
+        pass
+
+    def lookup(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise WebServiceError("private backend exploded sk_live_secret_key")
+
+    module.WebServiceError = WebServiceError  # type: ignore[attr-defined]
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+
+    with pytest.raises(AcoustIDLookupError) as excinfo:
+        PyAcoustIDLookupAdapter()(_fingerprint(value="RAW-FINGERPRINT-SECRET"), api_key="sk_live_secret_key")
+
+    assert excinfo.value.phase == "service"
+    assert excinfo.value.status == "web_service_error"
+    message = str(excinfo.value)
+    assert "service lookup failed" in message
+    for secret in RAW_SECRET_VALUES:
+        assert secret not in message
+
+
+@pytest.mark.parametrize(
+    ("backend_error", "expected_phase", "expected_status"),
+    [
+        (TimeoutError("private backend exploded sk_live_secret_key"), "timeout", "timeout"),
+        (OSError("private backend exploded sk_live_secret_key"), "service", "network_error"),
+    ],
+)
+def test_pyacoustid_lookup_adapter_wraps_timeout_and_network_errors_without_backend_text(
+    backend_error: BaseException,
+    expected_phase: str,
+    expected_status: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("acoustid")
+
+    def lookup(*_args: object, **_kwargs: object) -> dict[str, object]:
+        raise backend_error
+
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+
+    with pytest.raises(AcoustIDLookupError) as excinfo:
+        PyAcoustIDLookupAdapter()(_fingerprint(value="RAW-FINGERPRINT-SECRET"), api_key="sk_live_secret_key")
+
+    assert excinfo.value.phase == expected_phase
+    assert excinfo.value.status == expected_status
+    message = str(excinfo.value)
+    for secret in RAW_SECRET_VALUES:
+        assert secret not in message
+
+
+def test_pyacoustid_lookup_adapter_routes_malformed_response_through_redacted_parser(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    module = ModuleType("acoustid")
+
+    def lookup(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"status": "ok", "results": "raw-payload-secret"}
+
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+
+    with pytest.raises(AcoustIDLookupError) as excinfo:
+        PyAcoustIDLookupAdapter()(_fingerprint(), api_key="sk_live_secret_key")
+
+    assert excinfo.value.phase == "parse"
+    assert excinfo.value.status == "malformed"
+    assert "raw-payload-secret" not in str(excinfo.value)
+
+
+def test_pyacoustid_lookup_adapter_returns_no_match_for_empty_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = ModuleType("acoustid")
+
+    def lookup(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {"status": "ok", "results": []}
+
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+
+    result = PyAcoustIDLookupAdapter()(_fingerprint(), api_key="sk_live_secret_key")
+
+    assert result == AcoustIDLookupResult(
+        acoustid_id=None,
+        recording_id=None,
+        title=None,
+        artist=None,
+        album=None,
+        score=None,
+        raw_status="no_match",
+        lookup_source="acoustid",
+    )
+
+
+def test_pyacoustid_lookup_adapter_preserves_low_confidence_match_evidence(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = ModuleType("acoustid")
+
+    def lookup(*_args: object, **_kwargs: object) -> dict[str, object]:
+        return {
+            "status": "ok",
+            "results": [
+                {
+                    "id": "low-acoustid",
+                    "score": 0.03,
+                    "recordings": [{"id": "low-recording", "title": "Low Confidence"}],
+                }
+            ],
+        }
+
+    module.lookup = lookup  # type: ignore[attr-defined]
+    monkeypatch.setitem(sys.modules, "acoustid", module)
+
+    result = PyAcoustIDLookupAdapter()(_fingerprint(), api_key="sk_live_secret_key")
+
+    assert result.acoustid_id == "low-acoustid"
+    assert result.recording_id == "low-recording"
+    assert result.title == "Low Confidence"
+    assert result.score == pytest.approx(0.03)
+    assert result.raw_status == "ok"

@@ -1,7 +1,12 @@
 """Fingerprint boundary public API."""
 
 from tidemark.fingerprint.generator import FingerprintError, fingerprint_audio_chunk
-from tidemark.fingerprint.lookup import AcoustIDLookupAdapter, identify_fingerprint, normalize_acoustid_lookup_response
+from tidemark.fingerprint.lookup import (
+    AcoustIDLookupAdapter,
+    PyAcoustIDLookupAdapter,
+    identify_fingerprint,
+    normalize_acoustid_lookup_response,
+)
 from tidemark.fingerprint.models import (
     AcoustIDLookupError,
     AcoustIDLookupResult,
@@ -17,6 +22,7 @@ __all__ = [
     "AudioFingerprint",
     "FingerprintError",
     "FingerprintIdentificationResult",
+    "PyAcoustIDLookupAdapter",
     "RetainedAudioFile",
     "RetentionError",
     "fingerprint_audio_chunk",
