@@ -1,18 +1,26 @@
 from __future__ import annotations
 
 from dataclasses import replace
+from io import BytesIO
 
 import pytest
 
-from tidemark.markers.models import AdMarker
-from tidemark.markers.classifier import (
+from tidemark.ingest.hls import direct_cue_marker
+from tidemark.ingest.icy import iter_icy_markers
+from tidemark.markers import (
     AD_END,
     AD_START,
     UNKNOWN,
+    AdMarker,
     Classifier,
     classify_marker,
     classify_markers,
+    decode_id3_markers_from_segment_bytes,
+    decode_scte35_marker,
 )
+from tests.test_icy_ingest import build_icy_stream
+from tests.test_id3_markers import build_id3_tag
+from tests.test_scte35_threefive_mapping import SPLICE_INSERT_OON_TRUE, SPLICE_NULL
 
 
 def marker(
@@ -49,6 +57,19 @@ def assert_classifies(ad_marker: AdMarker, expected: str, classifier: Classifier
     assert ad_marker.tags == original.tags
 
 
+def assert_only_classification_changes(ad_marker: AdMarker, expected: str, classifier: Classifier | None = None) -> None:
+    before = ad_marker.to_dict()
+    result = (classifier or Classifier()).classify(ad_marker)
+    after = ad_marker.to_dict()
+
+    assert result == expected
+    assert after["Classification"] == expected
+    assert list(after) == list(before)
+    assert {key: value for key, value in after.items() if key != "Classification"} == {
+        key: value for key, value in before.items() if key != "Classification"
+    }
+
+
 def test_exports_plain_go_classification_strings_and_helpers() -> None:
     assert UNKNOWN == "UNKNOWN"
     assert AD_START == "AD_START"
@@ -65,6 +86,84 @@ def test_exports_plain_go_classification_strings_and_helpers() -> None:
     ]
     assert classify_markers(markers) == [AD_START, AD_END]
     assert [item.classification for item in markers] == [AD_START, AD_END]
+
+
+def test_decoded_scte35_fixture_markers_classify_without_changing_serialization_contract() -> None:
+    splice_insert = decode_scte35_marker(
+        SPLICE_INSERT_OON_TRUE,
+        source="hls_manifest",
+        tag="#EXT-X-SCTE35",
+        segment=7,
+        timestamp=123.0,
+    )
+    splice_null = decode_scte35_marker(SPLICE_NULL, source="fixture")
+    synthetic_splice_in = AdMarker(
+        type="SCTE35",
+        classification=UNKNOWN,
+        source="synthetic",
+        fields={"CommandName": "Splice Insert", "OutOfNetworkIndicator": "false"},
+    )
+
+    assert_only_classification_changes(splice_insert, AD_START)
+    assert_only_classification_changes(splice_null, UNKNOWN)
+    assert_only_classification_changes(synthetic_splice_in, AD_END)
+
+
+def test_decoded_id3_fixture_markers_classify_from_real_frame_fields() -> None:
+    ad_title = decode_id3_markers_from_segment_bytes(
+        build_id3_tag(title="Next ad break", txxx_text=("station",)), source="fixture"
+    )[0]
+    ad_txxx = decode_id3_markers_from_segment_bytes(
+        build_id3_tag(title="Episode segment", txxx_desc="Avail", txxx_text=("promo",)), source="fixture"
+    )[0]
+    ad_end = decode_id3_markers_from_segment_bytes(
+        build_id3_tag(title="Episode segment", txxx_desc="cue", txxx_text=("ad_end",)), source="fixture"
+    )[0]
+    content_start = decode_id3_markers_from_segment_bytes(
+        build_id3_tag(title="Episode segment", txxx_desc="cue", txxx_text=("content_start",)), source="fixture"
+    )[0]
+    benign = decode_id3_markers_from_segment_bytes(
+        build_id3_tag(title="Episode segment", txxx_desc="chapter", txxx_text=("liner",)), source="fixture"
+    )[0]
+
+    assert_only_classification_changes(ad_title, AD_START)
+    assert_only_classification_changes(ad_txxx, AD_START)
+    assert_only_classification_changes(ad_end, AD_END)
+    assert_only_classification_changes(content_start, AD_END)
+    assert_only_classification_changes(benign, UNKNOWN)
+
+
+def test_icy_fixture_marker_sequence_classifies_with_one_stream_classifier() -> None:
+    stream = build_icy_stream(
+        16,
+        [
+            b"StreamTitle='Morning Show';",
+            b"StreamTitle='Promo Spot';",
+            b"StreamTitle='Morning Show';",
+        ],
+    )
+    markers = list(iter_icy_markers(BytesIO(stream), meta_int=16))
+    classifier = Classifier()
+
+    assert [classifier.classify(item) for item in markers] == [UNKNOWN, AD_START, AD_END]
+    assert [item.classification for item in markers] == [UNKNOWN, AD_START, AD_END]
+
+
+def test_direct_hls_cue_fixture_markers_classify_without_changing_marker_contract() -> None:
+    cue_out = direct_cue_marker("#EXT-X-CUE-OUT", {"DURATION": "30"}, segment=9, timestamp=12.5)
+    cue_in = direct_cue_marker("#EXT-X-CUE-IN", {}, segment=10, timestamp=18.5)
+
+    assert_only_classification_changes(cue_out, AD_START)
+    assert cue_out.source == "hls_manifest"
+    assert cue_out.tag == "#EXT-X-CUE-OUT"
+    assert cue_out.segment == 9
+    assert cue_out.fields == {"DURATION": "30"}
+
+    assert_only_classification_changes(cue_in, AD_END)
+    assert cue_in.source == "hls_manifest"
+    assert cue_in.tag == "#EXT-X-CUE-IN"
+    assert cue_in.segment == 10
+    assert cue_in.fields == {}
 
 
 def test_scte35_splice_insert_out_of_network_rules() -> None:
