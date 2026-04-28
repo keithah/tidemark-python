@@ -73,6 +73,26 @@ def write_manifest(path: Path, segment_name: str) -> Path:
     return path
 
 
+def write_repeated_manifest(path: Path, segment_name: str) -> Path:
+    path.write_text(
+        "\n".join(
+            [
+                "#EXTM3U",
+                "#EXT-X-MEDIA-SEQUENCE:37",
+                "#EXT-X-CUE-OUT:DURATION=0.40",
+                "#EXTINF:0.20,",
+                segment_name,
+                "#EXTINF:0.20,",
+                segment_name,
+                "#EXT-X-CUE-IN",
+                "#EXT-X-ENDLIST",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    return path
+
+
 def write_transcript(path: Path) -> Path:
     path.write_text(
         json.dumps(
@@ -99,6 +119,15 @@ def cli_env_without_acoustid_key() -> dict[str, str]:
 
 def seed_fingerprint_cache_for_manifest(manifest: Path, db_path: Path) -> None:
     [segment] = resolve_segments(manifest)
+    seed_fingerprint_cache_for_segment(segment, db_path)
+
+
+def seed_fingerprint_cache_for_segment_index(manifest: Path, db_path: Path, index: int = 0) -> None:
+    segments = resolve_segments(manifest)
+    seed_fingerprint_cache_for_segment(segments[index], db_path)
+
+
+def seed_fingerprint_cache_for_segment(segment, db_path: Path) -> None:
     chunk = decode_segment_audio(segment)
     try:
         fingerprint = fingerprint_audio_chunk(chunk)
@@ -118,6 +147,16 @@ def seed_fingerprint_cache_for_manifest(manifest: Path, db_path: Path) -> None:
             raw_status="ok",
             lookup_source="seeded-installed-cli-cache",
         )
+
+
+def assert_public_output_redacted(*outputs: str, forbidden: tuple[str, ...]) -> None:
+    combined = "\n".join(outputs)
+    for value in forbidden:
+        assert value not in combined
+    assert "ACOUSTID" not in combined
+    assert "api_key" not in combined.lower()
+    assert "secret" not in combined.lower()
+    assert "Traceback" not in combined
 
 
 def assert_installed_fingerprint_ingest_succeeds(
@@ -191,6 +230,120 @@ def test_installed_fingerprint_ingest_uses_seeded_cache_without_transcript_or_ap
     assert retained_file.suffix == ".wav"
     assert media_path.stem not in retained_file.name
     assert "private" not in retained_file.name
+
+
+def test_installed_m003_flow_ingests_reports_and_exports_clip_from_one_database(tmp_path: Path) -> None:
+    media_path = make_tiny_wav(tmp_path / "private-segment37.wav")
+    manifest = write_repeated_manifest(tmp_path / "private-playlist.m3u8", media_path.name)
+    db_path = tmp_path / "tidemark.db"
+    clip_path = tmp_path / "private-exported-clip.wav"
+    forbidden_public_values = (str(tmp_path), media_path.name, manifest.name, db_path.name, clip_path.name, "private")
+
+    seed_fingerprint_cache_for_segment_index(manifest, db_path, index=0)
+
+    ingest = run_tidemark(
+        "ingest",
+        manifest.name,
+        "--db",
+        db_path.name,
+        "--fingerprint",
+        cwd=tmp_path,
+        env=cli_env_without_acoustid_key(),
+    )
+
+    assert ingest.returncode == 0, f"stdout={ingest.stdout}\nstderr={ingest.stderr}"
+    assert ingest.stderr == ""
+    assert "segments=2" in ingest.stdout
+    assert "words=0" in ingest.stdout
+    assert "markers=1" in ingest.stdout
+    assert "retained=2" in ingest.stdout
+    assert "songs=2" in ingest.stdout
+    assert "issues=0" in ingest.stdout
+    assert_public_output_redacted(ingest.stdout, ingest.stderr, forbidden=forbidden_public_values)
+
+    with sqlite3.connect(db_path) as conn:
+        assert conn.execute("PRAGMA user_version").fetchone()[0] == SCHEMA_VERSION
+        assert count_rows(conn, "segments") == 2
+        assert count_rows(conn, "transcript_words") == 0
+        assert count_rows(conn, "fingerprint_cache") == 1
+        assert count_rows(conn, "songs") == 2
+        assert count_rows(conn, "retained_audio") == 2
+        assert (
+            conn.execute(
+                """
+                SELECT COUNT(*)
+                FROM ad_events
+                WHERE classification = 'AD_START' AND source = 'hls_manifest'
+                """
+            ).fetchone()[0]
+            == 1
+        )
+        retained_paths = [row[0] for row in conn.execute("SELECT path FROM retained_audio ORDER BY start_ts").fetchall()]
+
+    for retained_path_text in retained_paths:
+        retained_path = Path(retained_path_text)
+        retained_file = retained_path if retained_path.is_absolute() else tmp_path / retained_path
+        assert retained_file.exists(), retained_file
+        assert retained_file.parent == db_path.parent / "tidemark-audio"
+        assert retained_file.suffix == ".wav"
+        assert media_path.stem not in retained_file.name
+        assert "private" not in retained_file.name
+
+    plays = run_tidemark("report", "plays", "--db", db_path.name, "--json", cwd=tmp_path)
+    repeats = run_tidemark("report", "repeats", "--db", db_path.name, "--json", cwd=tmp_path)
+    ads = run_tidemark("report", "ads", "--db", db_path.name, "--json", cwd=tmp_path)
+
+    for result in (plays, repeats, ads):
+        assert result.returncode == 0, f"stdout={result.stdout}\nstderr={result.stderr}"
+        assert result.stderr == ""
+        assert_public_output_redacted(result.stdout, result.stderr, forbidden=forbidden_public_values)
+
+    play_rows = json.loads(plays.stdout)
+    assert isinstance(play_rows, list)
+    assert len(play_rows) == 2
+    assert [row["title"] for row in play_rows] == ["Generated integration tone", "Generated integration tone"]
+    assert {row["lookup_source"] for row in play_rows} == {"cache"}
+    assert {row["segment_sequence"] for row in play_rows} == {37, 38}
+    assert [row["start_ts"] for row in play_rows] == [0.0, 0.2]
+
+    repeat_rows = json.loads(repeats.stdout)
+    assert isinstance(repeat_rows, list)
+    assert len(repeat_rows) == 1
+    [repeat_row] = repeat_rows
+    assert repeat_row["title"] == "Generated integration tone"
+    assert repeat_row["count"] == 2
+    assert repeat_row["first_start_ts"] == 0.0
+    assert repeat_row["last_start_ts"] == 0.2
+
+    ad_rows = json.loads(ads.stdout)
+    assert isinstance(ad_rows, list)
+    assert ad_rows
+    assert any(row["classification"] == "AD_START" and row["count"] >= 1 for row in ad_rows)
+
+    clip = run_tidemark(
+        "clip",
+        "--at",
+        "0.25",
+        "--context",
+        "0.05",
+        "--db",
+        db_path.name,
+        "--out",
+        clip_path.name,
+        cwd=tmp_path,
+    )
+
+    assert clip.returncode == 0, f"stdout={clip.stdout}\nstderr={clip.stderr}"
+    assert clip.stderr == ""
+    assert re.fullmatch(r"Clip exported: start=0\.200 duration=0\.100 bytes=\d+ sha256=[0-9a-f]{64}\n", clip.stdout)
+    assert_public_output_redacted(clip.stdout, clip.stderr, forbidden=forbidden_public_values)
+    assert clip_path.read_bytes().startswith(b"RIFF")
+
+    with wave.open(str(clip_path), "rb") as exported:
+        assert exported.getnchannels() == 1
+        assert exported.getframerate() == 16000
+        assert exported.getsampwidth() == 2
+        assert 0 < exported.getnframes() <= 1600
 
 
 def test_installed_fingerprint_ingest_retained_audio_can_be_exported_by_clip(tmp_path: Path) -> None:

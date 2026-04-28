@@ -6,6 +6,7 @@ import json
 from dataclasses import asdict
 from pathlib import Path
 from typing import Annotated
+from urllib.parse import urlparse
 
 import typer
 
@@ -211,7 +212,7 @@ def _emit_json_or_human[RowT](
     format_row,
 ) -> None:
     if json_output:
-        typer.echo(json.dumps([asdict(row) for row in rows], separators=(",", ":")))
+        typer.echo(json.dumps([_public_report_dict(row) for row in rows], separators=(",", ":")))
         return
 
     if not rows:
@@ -222,10 +223,26 @@ def _emit_json_or_human[RowT](
         typer.echo(format_row(row))
 
 
+def _public_report_dict(row: object) -> dict[str, object]:
+    values = asdict(row)
+    if "source_url" in values:
+        values["source_url"] = _public_source_label(str(values["source_url"]))
+    if "source_urls" in values:
+        values["source_urls"] = [_public_source_label(str(source_url)) for source_url in values["source_urls"]]
+    return values
+
+
+def _public_source_label(source_url: str) -> str:
+    parsed = urlparse(source_url)
+    if parsed.scheme == "file":
+        return "[local file]"
+    return source_url
+
+
 def _format_play_row(row: PlayReportRow) -> str:
     end_ts = row.start_ts + row.duration_seconds
     parts = [
-        row.source_url,
+        _public_source_label(row.source_url),
         f"{row.start_ts:.3f}s-{end_ts:.3f}s",
         f"segment {row.segment_id} seq {row.segment_sequence}",
         row.title,
@@ -246,7 +263,7 @@ def _format_repeat_row(row: RepeatReportRow) -> str:
             f"count {row.count}",
             f"first {row.first_start_ts:.3f}s",
             f"last {row.last_start_ts:.3f}s",
-            f"sources {', '.join(sorted(row.source_urls))}",
+            f"sources {', '.join(sorted(_public_source_label(source_url) for source_url in row.source_urls))}",
             f"best_score {row.best_score:.3f}",
         ]
     )
@@ -256,7 +273,7 @@ def _format_repeat_row(row: RepeatReportRow) -> str:
 def _format_ad_row(row: AdSummaryReportRow) -> str:
     return " | ".join(
         [
-            row.source_url,
+            _public_source_label(row.source_url),
             row.classification,
             row.marker_type,
             f"count {row.count}",
