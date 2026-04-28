@@ -1,0 +1,355 @@
+# tidemark-python — GSD Spec (v2)
+
+**Repo:** `tidemark-python` (replaces `tidemark-go` entirely)  
+**Mission:** One tool that does everything tidemark-go does today — ad marker detection across HLS, Icecast, MPEGTS, and UDP — and adds local audio transcription, song fingerprinting, full-text search, and eventually a GUI. Single distributable binary, no Python install required for end users.
+
+---
+
+## Guiding Principles
+
+- **Full parity first.** M001 is a complete port of tidemark-go. Nothing from M002+ ships until every Go feature works in Python.
+- **Library-first.** Every capability lives in `tidemark.*` as importable Python. CLI is a thin shell. GUI (M005) calls the same library with zero changes underneath.
+- **SQLite is the source of truth.** Ad events, transcription words, song fingerprints — one `.db` file, one unified timeline.
+- **Platform-aware transcription.** macOS uses `SFSpeechRecognizer` via PyObjC (on-device, free, CoreML-accelerated). Linux/Windows use `openai-whisper`. The `Transcriber` protocol makes the caller indifferent.
+- **Single binary is a packaging concern.** PyInstaller + `imageio-ffmpeg` handles it in M004. M001–M003 don't compromise that path.
+- **tidemark-go is retired** once M001 passes a side-by-side output comparison test against the same streams.
+
+---
+
+## Key Python Libraries for the Go Port
+
+| Go capability | Python equivalent |
+|---|---|
+| `cuei` SCTE-35 decoding | `threefive` (same author — futzu — Python-first library) |
+| HLS manifest parsing | `m3u8` + `threefive` built-in HLS support |
+| ID3 tag parsing | `mutagen` |
+| ICY metadata reading | `httpx` with `Icy-MetaData: 1` header, custom chunker |
+| MPEGTS packet parsing | `threefive` (reads raw TS streams natively) |
+| UDP multicast | Python stdlib `socket` with `IP_ADD_MEMBERSHIP` |
+| JSON output + color | `rich` |
+| CLI flags | `typer` |
+
+`threefive` is the load-bearing choice here. It handles SCTE-35 from HLS playlists, raw MPEG-TS bytes, and arbitrary byte streams. The Go code used `cuei`; `threefive` is the direct Python equivalent from the same author, so behavior is well-understood.
+
+---
+
+## Repository Layout
+
+```
+tidemark-python/
+├── src/
+│   └── tidemark/
+│       ├── __init__.py
+│       │
+│       ├── ingest/                    # Stream readers → raw bytes + metadata
+│       │   ├── base.py                # Abstract IngestSource, StreamEvent dataclass
+│       │   ├── hls.py                 # HLS m3u8 poller, segment downloader, sequence tracking
+│       │   ├── icecast.py             # ICY stream reader, metaint chunker, metadata extractor
+│       │   ├── mpegts.py              # Raw MPEG-TS over HTTP or file
+│       │   └── udp.py                 # UDP multicast receiver
+│       │
+│       ├── markers/                   # Ad marker detection (port of Go core)
+│       │   ├── scte35.py              # threefive wrapper: decode SCTE-35 → AdMarker
+│       │   ├── id3.py                 # mutagen: parse ID3 tags from HLS segments → AdMarker
+│       │   ├── icy.py                 # Parse ICY StreamTitle for ad fields → AdMarker
+│       │   ├── classifier.py          # AD_START / AD_END / UNKNOWN classification logic
+│       │   └── models.py              # AdMarker dataclass (type, classification, source, tag, segment, timestamp, raw)
+│       │
+│       ├── audio/                     # Audio decode pipeline (new)
+│       │   ├── decoder.py             # imageio-ffmpeg: segment bytes → PCM float32, 16 kHz mono
+│       │   └── models.py              # AudioChunk (pcm, sample_rate, start_ts, duration_s, source_url)
+│       │
+│       ├── transcribe/                # Speech recognition (new)
+│       │   ├── base.py                # Transcriber protocol → TranscriptResult(words: list[WordToken])
+│       │   ├── apple.py               # PyObjC SFSpeechRecognizer (macOS 10.15+)
+│       │   └── whisper.py             # openai-whisper, word_timestamps=True (Linux/Windows/fallback)
+│       │
+│       ├── fingerprint/               # Song identification (new)
+│       │   ├── chromaprint.py         # pyacoustid: PCM → fingerprint string
+│       │   └── acoustid.py            # AcoustID lookup, fingerprint_cache dedup
+│       │
+│       ├── store/                     # Persistence layer
+│       │   ├── db.py                  # SQLite connection, migrations runner
+│       │   ├── schema.sql             # Canonical schema (ad_events, segments, words, words_fts, songs, fingerprint_cache)
+│       │   └── models.py              # Python dataclasses mirroring all DB rows
+│       │
+│       ├── query/                     # Read-side (new)
+│       │   ├── search.py              # FTS5 phrase search + context window builder
+│       │   └── reports.py             # plays_report(), repeats_report(), ad_report()
+│       │
+│       ├── pipeline.py                # Orchestrator: ingest → [markers | audio → transcribe/fingerprint] → store
+│       │
+│       └── cli/
+│           ├── main.py                # Typer root app
+│           ├── cmd_monitor.py         # `tidemark monitor <url>` — real-time ad markers (parity with go tool)
+│           ├── cmd_ingest.py          # `tidemark ingest <url>` — full pipeline: markers + transcription + fingerprinting
+│           ├── cmd_search.py          # `tidemark search <phrase> [--context 5]`
+│           └── cmd_report.py          # `tidemark report plays|repeats|ads`
+│
+├── tests/
+│   ├── fixtures/                      # Short .ts, .mp3, .m3u8, raw SCTE-35 binaries
+│   ├── test_scte35.py
+│   ├── test_id3.py
+│   ├── test_icy.py
+│   ├── test_hls_ingest.py
+│   ├── test_icecast_ingest.py
+│   ├── test_mpegts_ingest.py
+│   ├── test_audio_decoder.py
+│   ├── test_transcribe_whisper.py
+│   ├── test_fingerprint.py
+│   ├── test_store.py
+│   └── test_search.py
+│
+├── pyproject.toml
+├── CHANGELOG.md
+└── README.md
+```
+
+---
+
+## SQLite Schema
+
+```sql
+-- Ad marker events (port of Go's JSON output into DB)
+CREATE TABLE ad_events (
+    id              INTEGER PRIMARY KEY,
+    source_url      TEXT NOT NULL,
+    marker_type     TEXT NOT NULL,    -- 'SCTE35' | 'ID3' | 'ICY'
+    classification  TEXT NOT NULL,    -- 'AD_START' | 'AD_END' | 'UNKNOWN'
+    source          TEXT,             -- 'hls_manifest' | 'hls_segment' | 'icy_metadata' | 'udp' | 'mpegts'
+    tag             TEXT,             -- raw tag/field that triggered detection
+    segment_seq     INTEGER,          -- EXT-X-MEDIA-SEQUENCE number (HLS only)
+    pts             REAL,             -- SCTE-35 PTS value where available
+    break_duration  REAL,             -- seconds, where available
+    raw_json        TEXT,             -- full threefive/mutagen output as JSON
+    ts              REAL NOT NULL,    -- wall-clock Unix epoch when detected
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now','subsec'))
+);
+
+-- Audio segments ingested
+CREATE TABLE segments (
+    id          INTEGER PRIMARY KEY,
+    source_url  TEXT NOT NULL,
+    seq         INTEGER,              -- EXT-X-MEDIA-SEQUENCE (HLS) or chunk counter
+    start_ts    REAL NOT NULL,        -- wall-clock Unix epoch
+    duration_s  REAL NOT NULL,
+    audio_path  TEXT,                 -- NULL unless retained (match or fingerprint hit)
+    sha256      TEXT UNIQUE,          -- for dedup on restart
+    created_at  REAL NOT NULL DEFAULT (unixepoch('now','subsec'))
+);
+
+-- Words from transcription
+CREATE TABLE words (
+    id          INTEGER PRIMARY KEY,
+    segment_id  INTEGER REFERENCES segments(id),
+    word        TEXT NOT NULL,
+    start_ts    REAL NOT NULL,        -- absolute wall-clock epoch
+    end_ts      REAL NOT NULL,
+    confidence  REAL
+);
+
+-- FTS5 over words
+CREATE VIRTUAL TABLE words_fts USING fts5(
+    word,
+    content='words',
+    content_rowid='id'
+);
+
+-- Song fingerprints + AcoustID results
+CREATE TABLE songs (
+    id              INTEGER PRIMARY KEY,
+    segment_id      INTEGER REFERENCES segments(id),
+    fingerprint     TEXT NOT NULL,
+    acoustid_id     TEXT,
+    title           TEXT,
+    artist          TEXT,
+    album           TEXT,
+    score           REAL,
+    lookup_ts       REAL,
+    created_at      REAL NOT NULL DEFAULT (unixepoch('now','subsec'))
+);
+
+-- Dedup cache: same fingerprint never hits AcoustID twice
+CREATE TABLE fingerprint_cache (
+    fingerprint     TEXT PRIMARY KEY,
+    acoustid_id     TEXT,
+    title           TEXT,
+    artist          TEXT,
+    score           REAL,
+    cached_at       REAL NOT NULL DEFAULT (unixepoch('now','subsec'))
+);
+```
+
+---
+
+## CLI Surface (full)
+
+```
+# Real-time ad marker monitoring — parity with tidemark-go
+tidemark monitor <url>
+    [--stream-type hls|icecast|mpegts|udp|auto]
+    [--filter scte35|id3|icy]           # show only these marker types
+    [--json]                             # NDJSON output
+    [--json-out <file>]                  # also write NDJSON to file
+    [--quiet]                            # suppress color summary, JSON only
+    [--timeout <seconds>]
+
+# Full pipeline: markers + transcription + fingerprinting → SQLite
+tidemark ingest <url>
+    [--stream-type hls|icecast|mpegts|udp|auto]
+    [--db <path>]                        # default: ./tidemark.db
+    [--no-transcribe]
+    [--no-fingerprint]
+    [--whisper-model tiny|base|small]   # default: base
+
+# Search transcription
+tidemark search <phrase>
+    [--db <path>]
+    [--context <seconds>]               # default: 5
+    [--since <duration>]                # e.g. 2h, 24h, 7d
+    [--json]
+
+# Reports
+tidemark report plays   [--db <path>] [--since <duration>] [--source <url>]
+tidemark report repeats [--db <path>] [--since <duration>] [--min-count 2]
+tidemark report ads     [--db <path>] [--since <duration>] [--source <url>]
+
+# Export audio clip
+tidemark clip --at <iso-timestamp> [--context 10] [--out <file>] [--db <path>]
+```
+
+The `monitor` command is a direct port of the Go tool's behavior — stdout only, no DB, same JSON schema, same color output. Drop-in replacement for anyone using tidemark-go in scripts.
+
+---
+
+## Milestones
+
+---
+
+### M001 — Go Feature Parity: Ad Marker Detection
+
+**Done when:** `tidemark monitor` produces identical output to `tidemark-go` on the same HLS, Icecast, MPEGTS, and UDP streams. Side-by-side comparison test passes. tidemark-go can be retired.
+
+| Slice | Title | Deliverable |
+|-------|-------|-------------|
+| S001 | Project scaffold | `pyproject.toml`, `src/` layout, empty module stubs, `pytest` configured, CI skeleton, DB schema committed |
+| S002 | SCTE-35 decoder | `markers/scte35.py`: wrap `threefive` to produce `AdMarker` dataclasses from raw SCTE-35 payloads. Unit tested against binary fixtures extracted from the Go test suite. |
+| S003 | HLS ingest + SCTE-35 | `ingest/hls.py`: poll m3u8, download segments, track `EXT-X-MEDIA-SEQUENCE`. `markers/scte35.py` called on manifest tags (`#EXT-X-CUE-OUT`, `#EXT-X-DATERANGE`, `#EXT-X-SCTE35`) and raw segment bytes. |
+| S004 | ID3 parser | `markers/id3.py`: extract ID3 frames from HLS `.ts` segments using `mutagen`. Detect SCTE-35 data in `PRIV` frames, `com.apple.streaming.transportStreamTimestamp`, etc. |
+| S005 | ICY / Icecast ingest | `ingest/icecast.py`: ICY protocol reader. `markers/icy.py`: parse `StreamTitle` for ad fields (e.g. `AD`, `adbreak`, station-specific patterns). |
+| S006 | MPEGTS ingest | `ingest/mpegts.py`: read raw TS over HTTP. Feed packet bytes to `threefive` for SCTE-35 detection. |
+| S007 | UDP multicast | `ingest/udp.py`: join multicast group, receive TS packets, feed to `threefive`. |
+| S008 | Classifier | `markers/classifier.py`: port Go's `AD_START` / `AD_END` / `UNKNOWN` heuristics. Takes raw marker data → classification enum. |
+| S009 | `monitor` CLI + output | `cmd_monitor.py`: wire all ingest sources + classifiers. JSON, NDJSON-to-file, color summary (Rich), `--filter`, `--quiet`, `--timeout`. Match Go's output schema exactly. |
+| S010 | Parity test suite | Capture Go tool output on 3–4 real streams. Run Python tool on same streams. Assert JSON output matches (modulo wall-clock timestamps). |
+
+---
+
+### M002 — Ingest Pipeline: Transcription + Search
+
+**Done when:** `tidemark ingest <url>` runs, transcription words land in SQLite, `tidemark search "word"` returns hits with timestamps and ±N second context.
+
+| Slice | Title | Deliverable |
+|-------|-------|-------------|
+| S011 | Audio decoder | `audio/decoder.py`: `imageio-ffmpeg` decode of `.ts` / `.mp3` / PCM bytes → `AudioChunk` (float32 array, 16 kHz mono, wall-clock `start_ts`, `duration_s`). Unit tested with fixture file. |
+| S012 | Transcriber — Apple | `transcribe/apple.py`: PyObjC `SFSpeechRecognizer` in Python. Takes `.wav` path → `TranscriptResult` with word-level timestamps. macOS only. Integration tested with real fixture. |
+| S013 | Transcriber — Whisper | `transcribe/whisper.py`: `openai-whisper` with `word_timestamps=True`. Auto-selects engine: Apple on macOS if available, else Whisper. Config override. |
+| S014 | SQLite write path | `store/db.py`: insert `segments` + bulk-insert `words` + trigger FTS5 index. Also write `ad_events` from monitor pipeline so one DB covers both. |
+| S015 | Ingest orchestrator | `pipeline.py`: for each new segment → decode audio → transcribe → store words + segment. Ad marker detection runs in parallel on same segment bytes (no second download). |
+| S016 | Search CLI + context window | `tidemark search "phrase"`: FTS5 match → fetch `words` rows ±N seconds around each hit → reconstruct surrounding text → display with timestamp, source URL, and color highlight. |
+
+---
+
+### M003 — Fingerprinting + Song Reports + Clip Export
+
+**Done when:** Songs are identified with title/artist, `tidemark report plays` shows a timestamped playlist, `tidemark report repeats` shows repeat airings, clips can be extracted.
+
+| Slice | Title | Deliverable |
+|-------|-------|-------------|
+| S017 | Chromaprint fingerprinting | `fingerprint/chromaprint.py`: `pyacoustid` on each `AudioChunk` → fingerprint string stored in `songs` table alongside `segment_id`. |
+| S018 | AcoustID lookup + cache | `fingerprint/acoustid.py`: check `fingerprint_cache` first (zero API call on repeat). On miss, call AcoustID with user's API key, store title/artist/score. Config reads `ACOUSTID_API_KEY` from env or `config.toml`. Rate-limit to 3 req/s (AcoustID free tier). |
+| S019 | Song boundary detection | Merge consecutive segments with same `acoustid_id` into a single song event (start_ts → end_ts). Detect song changes and log boundaries. |
+| S020 | Reports CLI | `tidemark report plays [--since 2h] [--source <url>]` → timestamped playlist. `tidemark report repeats [--min-count 2]` → songs aired N+ times with each airtime listed. `tidemark report ads [--since 24h]` → ad break summary (port of Go's output into a queryable format). |
+| S021 | Clip export | `tidemark clip --at <iso-ts> [--context 10] [--out clip.wav]`: retrieve retained audio for the segment covering that timestamp ± context seconds, write WAV. Graceful message if audio wasn't retained. |
+
+---
+
+### M004 — Robustness + Single Binary Distribution
+
+**Done when:** Runs unattended for hours, survives stream drops, ships as a single executable on macOS arm64 and Linux x86_64 with no external dependencies.
+
+| Slice | Title | Deliverable |
+|-------|-------|-------------|
+| S022 | Config file (TOML) | `~/.config/tidemark/config.toml`: `acoustid_key`, `whisper_model`, `db_path`, `audio_retention_days`, `poll_interval_s`, `log_level`, `transcriber` override |
+| S023 | Reconnect + dedup | Exponential backoff on stream drop (cap 60s). Segment dedup via `sha256` column — skip re-processing on restart. HLS sequence-number resume. |
+| S024 | Structured logging + status | JSON log lines with: segment processing latency, transcription engine used, queue depth, error counts. `tidemark status` shows live stats from DB. |
+| S025 | PyInstaller spec | `tidemark.spec`: bundle `imageio-ffmpeg` binary, PyObjC frameworks (macOS build), all transitive deps. Whisper models downloaded on first run to `~/.cache/tidemark/whisper/`. CI produces `tidemark-macos-arm64` and `tidemark-linux-x86_64`. Tested on clean VM with zero Python. |
+
+---
+
+### M005 — GUI
+
+**Framework decision made at start of M005.** Leading options: PyObjC + AppKit (native macOS, same process as library, best feel) or PySide6 (cross-platform). Both read the same SQLite DB — zero changes to M001–M004 code.
+
+| Slice | Title | Deliverable |
+|-------|-------|-------------|
+| S026 | Framework selection + app shell | Windowed app opens, reads DB, shows stream status and last N events |
+| S027 | Live ad marker view | Real-time feed of `AD_START` / `AD_END` events as they're detected |
+| S028 | Live transcription view | Words appear in real time as segments are recognized |
+| S029 | Song timeline | Scrollable timeline of what played (artist/title/time), color-coded |
+| S030 | Search UI | Search box → highlighted results with surrounding context, click to play retained clip |
+| S031 | Stream manager | Add/remove/pause streams, reconnect, processing lag indicator |
+
+---
+
+## Dependencies (`pyproject.toml`)
+
+```toml
+[project]
+name = "tidemark"
+requires-python = ">=3.11"
+
+dependencies = [
+    "typer[all]>=0.12",
+    "httpx>=0.27",            # HLS polling, AcoustID API calls, ICY streams
+    "m3u8>=4.0",              # HLS playlist parsing
+    "threefive>=23.0",        # SCTE-35 decoding (same author as Go's cuei)
+    "mutagen>=1.47",          # ID3 tag parsing
+    "imageio-ffmpeg>=0.5",    # self-contained ffmpeg binary
+    "openai-whisper>=20240930",
+    "pyacoustid>=1.3",        # Chromaprint + AcoustID client
+    "numpy>=1.26",
+    "rich>=13",
+    "tomli>=2.0; python_version<'3.11'",
+]
+
+[project.optional-dependencies]
+macos = [
+    "pyobjc-framework-Speech>=10",
+    "pyobjc-framework-AVFoundation>=10",
+]
+gui = [
+    # populated at M005 start
+]
+
+[project.scripts]
+tidemark = "tidemark.cli.main:app"
+```
+
+---
+
+## Migration from tidemark-go
+
+- `tidemark monitor` is a **drop-in replacement** for `tidemark-go`. Same flags (mapped via aliases where names differ), same JSON output schema, same color output format.
+- tidemark-go users who pipe JSON to downstream tooling need zero changes.
+- A `MIGRATION.md` ships with M001 noting any flag renames and the one behavior difference: Python tool writes to SQLite by default when `--db` is provided; Go tool only wrote NDJSON files.
+
+---
+
+## Open Questions (parked)
+
+- **M001 S010 parity test:** Needs 3–4 real stream URLs (HLS + Icecast + one MPEGTS). Can use TuneIn streams — Keith has access.
+- **Whisper model default:** `base` (142 MB). Config lets users switch to `tiny` (speed) or `small` (quality). Large/turbo excluded from default bundle.
+- **M005 framework:** Revisit at M005 kickoff — depends on whether Windows/Linux GUI is needed.
+- **MPEGTS over file:** The Go tool supports a file path as input. Python port should too — `ingest/mpegts.py` should accept both URL and local path.
+- **AcoustID rate limiting:** Free tier is 3 req/s. Fingerprint cache keeps steady-state well under this for repeat songs on music stations. Long cold-start on a new station may need a short sleep between lookups.
