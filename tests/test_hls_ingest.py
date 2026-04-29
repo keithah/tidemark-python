@@ -141,7 +141,7 @@ def test_direct_cue_marker_uses_ad_marker_contract_without_binary_decode(monkeyp
         "RawBase64": None,
         "Command": None,
         "Descriptors": [],
-        "Tags": [],
+        "Tags": {},
         "Fields": {"DURATION": "30"},
         "Timestamp": 12.5,
     }

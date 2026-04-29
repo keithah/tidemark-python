@@ -45,6 +45,7 @@ def decode_id3_markers_from_segment_bytes(
                 tag=tag,
                 segment=segment,
                 raw_base64=base64.b64encode(tag_bytes).decode("ascii"),
+                tags=_id3_tags(parsed),
                 fields=_id3_fields(parsed),
                 timestamp=timestamp,
             )
@@ -94,6 +95,41 @@ def _parse_id3_tag(tag_bytes: bytes, *, segment: int | None) -> ID3:
         return ID3(BytesIO(tag_bytes))
     except Exception as exc:  # pragma: no cover - dependency exception type varies.
         raise ValueError(_error_message("ID3 parse", segment, "unable to parse ID3 tag")) from exc
+
+
+def _id3_tags(parsed: ID3) -> dict[str, str]:
+    """Build a Go-compatible frame-id → value string map from a parsed ID3 tag.
+
+    Matches the Go Tags map[string]string format: TIT2/TIT3 → decoded text,
+    TXXX → "desc:value", PRIV → "owner:hexdata", GEOB → "mime:fn:desc:hexdata".
+    For duplicate frame IDs, last one wins (consistent with Go map behavior).
+    """
+    result: dict[str, str] = {}
+    for key, frame in sorted(parsed.items(), key=_frame_sort_key):
+        frame_id = str(getattr(frame, "FrameID", key.split(":", 1)[0]))
+        if frame_id in ("TIT2", "TIT3"):
+            text_list = getattr(frame, "text", [])
+            result[frame_id] = " ".join(str(v) for v in text_list)
+        elif frame_id == "TXXX":
+            desc = str(getattr(frame, "desc", ""))
+            text_list = getattr(frame, "text", [])
+            value = " ".join(str(v) for v in text_list)
+            result[frame_id] = f"{desc}:{value}" if desc else value
+        elif frame_id == "PRIV":
+            owner = str(getattr(frame, "owner", ""))
+            data = getattr(frame, "data", b"")
+            if not isinstance(data, bytes):
+                data = bytes(data)
+            result[frame_id] = f"{owner}:{data.hex()}"
+        elif frame_id == "GEOB":
+            mime = str(getattr(frame, "mime", ""))
+            filename = str(getattr(frame, "filename", ""))
+            desc = str(getattr(frame, "desc", ""))
+            data = getattr(frame, "data", b"")
+            if not isinstance(data, bytes):
+                data = bytes(data)
+            result[frame_id] = f"{mime}:{filename}:{desc}:{data.hex()}"
+    return result
 
 
 def _id3_fields(parsed: ID3) -> dict[str, Any]:

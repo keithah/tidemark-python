@@ -104,12 +104,6 @@ def _tag_candidates(marker: AdMarker) -> Iterable[str]:
     if isinstance(tag, str):
         yield tag
 
-    tags = getattr(marker, "tags", None)
-    if isinstance(tags, list):
-        for value in tags:
-            if isinstance(value, str):
-                yield value
-
 
 def _classify_scte35(fields: object) -> str:
     if not isinstance(fields, dict):
@@ -168,10 +162,8 @@ def _classify_id3(marker: AdMarker) -> str:
 
 def _id3_candidates(marker: AdMarker) -> Iterable[str]:
     tags = getattr(marker, "tags", None)
-    if isinstance(tags, list):
-        for value in tags:
-            if isinstance(value, str):
-                yield value
+    if isinstance(tags, dict):
+        yield from (v for v in tags.values() if isinstance(v, str))
 
     fields = getattr(marker, "fields", None)
     if not isinstance(fields, dict):

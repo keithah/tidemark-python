@@ -86,7 +86,7 @@ def test_insert_ad_event_writes_normalized_columns_and_raw_marker_json():
         raw_base64="/DAv...",
         command={"name": "time_signal"},
         descriptors=[{"tag": 2}],
-        tags=["cue-out"],
+        tags={"TIT2": "cue-out"},
         fields={"duration": 30.0},
         timestamp=1.25,
     )

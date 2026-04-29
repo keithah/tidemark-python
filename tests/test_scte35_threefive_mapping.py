@@ -95,7 +95,7 @@ def test_marker_from_scte35_cue_maps_decoded_splice_null_to_go_compatible_contra
     assert marker_dict["PTS"] is None
     assert marker_dict["Command"]["name"] == "Splice Null"
     assert marker_dict["Descriptors"] == []
-    assert marker_dict["Tags"] == []
+    assert marker_dict["Tags"] == {}
     assert marker_dict["Fields"] == {"CommandName": "Splice Null"}
 
 
@@ -138,7 +138,7 @@ def test_decode_splice_null_marker_has_default_containers_and_json_contract():
     assert marker_dict["Fields"]["CommandName"] == "Splice Null"
     assert marker_dict["PTS"] is None
     assert marker_dict["Descriptors"] == []
-    assert marker_dict["Tags"] == []
+    assert marker_dict["Tags"] == {}
     assert marker_dict["Fields"] == {"CommandName": "Splice Null"}
 
     decoded = json.loads(marker.to_json())

@@ -219,17 +219,17 @@ def test_scte35_malformed_or_unknown_shapes_fail_closed(fields: object | None) -
     ],
 )
 def test_id3_end_keywords_take_precedence_over_start_keywords(candidate: str) -> None:
-    assert_classifies(marker("ID3", tags=[candidate]), AD_END)
+    assert_classifies(marker("ID3", tags={"TIT2": candidate}), AD_END)
 
 
 @pytest.mark.parametrize("candidate", ["ad", "spot", "promo", "commercial", "next ad break"])
 def test_id3_word_boundary_start_keywords(candidate: str) -> None:
-    assert_classifies(marker("ID3", tags=[candidate]), AD_START)
+    assert_classifies(marker("ID3", tags={"TIT2": candidate}), AD_START)
 
 
 @pytest.mark.parametrize("candidate", ["Administrator", "shadow", "adolescent", "promoção"])
 def test_id3_prevents_substring_false_positives(candidate: str) -> None:
-    assert_classifies(marker("ID3", tags=[candidate]), UNKNOWN)
+    assert_classifies(marker("ID3", tags={"TIT2": candidate}), UNKNOWN)
 
 
 def test_id3_extracts_text_arrays_and_txxx_description_text_from_fields_frames() -> None:
@@ -257,13 +257,13 @@ def test_id3_extracts_text_arrays_and_txxx_description_text_from_fields_frames()
 @pytest.mark.parametrize(
     "bad_fields,bad_tags",
     [
-        ({"Frames": "promo"}, []),
-        ({"Frames": [{"ID": "TXXX", "Description": 42, "Text": ["promo"]}]}, []),
-        ({"Frames": [{"ID": "TXXX", "Text": 42}]}, []),
-        ({"Frames": [{"ID": "TXXX"}]}, []),
-        ({"Frames": [42]}, []),
+        ({"Frames": "promo"}, {}),
+        ({"Frames": [{"ID": "TXXX", "Description": 42, "Text": ["promo"]}]}, {}),
+        ({"Frames": [{"ID": "TXXX", "Text": 42}]}, {}),
+        ({"Frames": [{"ID": "TXXX"}]}, {}),
+        ({"Frames": [42]}, {}),
         ({}, "promo"),
-        ([], []),
+        ([], {}),
     ],
 )
 def test_id3_malformed_shapes_do_not_raise_and_fail_closed(bad_fields: object, bad_tags: object) -> None:
@@ -309,6 +309,6 @@ def test_hls_cue_in_tags_classify_as_ad_end(tag: str) -> None:
 
 
 def test_unknown_marker_types_and_malformed_containers_fail_closed() -> None:
-    assert_classifies(marker("OTHER", fields={"StreamTitle": "promo"}, tags=["ad"]), UNKNOWN)
+    assert_classifies(marker("OTHER", fields={"StreamTitle": "promo"}, tags={"TIT2": "ad"}), UNKNOWN)
     assert_classifies(marker("ICY", fields=[]), UNKNOWN)
-    assert_classifies(marker("HLS", tag=None, tags="not-a-list"), UNKNOWN)
+    assert_classifies(marker("HLS", tag=None), UNKNOWN)

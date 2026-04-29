@@ -74,18 +74,11 @@ def test_decodes_id3_tag_at_offset_zero_with_go_compatible_marker_fields():
     assert marker_dict["RawBase64"] == base64.b64encode(tag_bytes).decode("ascii")
     assert not ({"type", "classification", "source", "raw_base64"} & set(marker_dict))
 
-    fields = marker_dict["Fields"]
-    assert fields["FrameIDs"] == ["PRIV", "TIT2", "TXXX"]
-    assert fields["Frames"] == [
-        {
-            "ID": "PRIV",
-            "Owner": "com.example.owner",
-            "DataBase64": base64.b64encode(b"private-payload").decode("ascii"),
-            "DataLength": len(b"private-payload"),
-        },
-        {"ID": "TIT2", "Text": ["Segment marker"]},
-        {"ID": "TXXX", "Description": "TIDEMARK", "Text": ["AD", "START"]},
-    ]
+    tags = marker_dict["Tags"]
+    assert set(tags.keys()) == {"TIT2", "PRIV", "TXXX"}
+    assert tags["TIT2"] == "Segment marker"
+    assert tags["PRIV"] == "com.example.owner:" + b"private-payload".hex()
+    assert tags["TXXX"] == "TIDEMARK:AD START"
 
 
 def test_scans_prefixed_id3_tag_without_encoding_prefix_or_suffix_in_raw_payload():
@@ -113,9 +106,9 @@ def test_decodes_multiple_complete_id3_tags_in_byte_order_with_deterministic_fra
         base64.b64encode(first).decode("ascii"),
         base64.b64encode(second).decode("ascii"),
     ]
-    assert [marker.fields["FrameIDs"] for marker in markers] == [["PRIV", "TIT2", "TXXX"], ["PRIV", "TIT2", "TXXX"]]
-    assert markers[0].fields["Frames"][1] == {"ID": "TIT2", "Text": ["First"]}
-    assert markers[1].fields["Frames"][1] == {"ID": "TIT2", "Text": ["Second"]}
+    assert [set(m.tags.keys()) for m in markers] == [{"TIT2", "PRIV", "TXXX"}, {"TIT2", "PRIV", "TXXX"}]
+    assert markers[0].tags["TIT2"] == "First"
+    assert markers[1].tags["TIT2"] == "Second"
 
 
 def test_rejects_non_synchsafe_id3_size_with_redacted_scan_error():

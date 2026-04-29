@@ -25,7 +25,7 @@ class AdMarker:
     raw_base64: str | None = None
     command: dict[str, Any] | None = None
     descriptors: list[dict[str, Any]] = field(default_factory=list)
-    tags: list[str] = field(default_factory=list)
+    tags: dict[str, str] = field(default_factory=dict)
     fields: dict[str, Any] = field(default_factory=dict)
     timestamp: float = 0.0
 

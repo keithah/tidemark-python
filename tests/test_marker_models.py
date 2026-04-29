@@ -32,7 +32,7 @@ def test_ad_marker_serializes_with_go_compatible_key_order():
         raw_base64="/DAv...",
         command={"name": "time_signal"},
         descriptors=[{"tag": 2}],
-        tags=["cue-out"],
+        tags={"TIT2": "cue-out"},
         fields={"duration": 30.0},
         timestamp=1.0,
     )
@@ -50,7 +50,7 @@ def test_ad_marker_serializes_with_go_compatible_key_order():
         "RawBase64": "/DAv...",
         "Command": {"name": "time_signal"},
         "Descriptors": [{"tag": 2}],
-        "Tags": ["cue-out"],
+        "Tags": {"TIT2": "cue-out"},
         "Fields": {"duration": 30.0},
         "Timestamp": 1.0,
     }
@@ -76,7 +76,7 @@ def test_ad_marker_json_round_trips_without_snake_case_keys():
 
 @pytest.mark.parametrize("field_name, first_value, second_value", [
     ("Descriptors", {"tag": 1}, {"tag": 2}),
-    ("Tags", "first", "second"),
+    ("Tags", ("TIT2", "first"), ("TXXX", "second")),
     ("Fields", ("first", 1), ("second", 2)),
 ])
 def test_default_containers_are_independent_between_marker_instances(field_name, first_value, second_value):
