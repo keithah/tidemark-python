@@ -7,7 +7,7 @@ name = "tidemark"
 version = "0.1.0"
 description = "Python port of tidemark ad marker detection."
 readme = "tidemark-python-gsd.md"
-requires-python = ">=3.11"
+requires-python = ">=3.12"
 license = { text = "Proprietary" }
 authors = [
     { name = "tidemark contributors" },
