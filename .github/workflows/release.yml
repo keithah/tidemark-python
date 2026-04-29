@@ -17,9 +17,6 @@ jobs:
           - os: macos-15
             platform: macos-arm64
             exe: tidemark
-          - os: macos-13
-            platform: macos-x86_64
-            exe: tidemark
           - os: windows-latest
             platform: windows-x86_64
             exe: tidemark.exe
