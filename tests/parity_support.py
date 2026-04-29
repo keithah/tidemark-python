@@ -43,8 +43,10 @@ def python_cli_path() -> Path:
 
 
 def build_go_cli(tmp_path: Path) -> Path:
+    import pytest
     go_source = Path("../tidemark-go")
-    assert go_source.exists(), "expected local ../tidemark-go reference checkout"
+    if not go_source.exists():
+        pytest.skip("local ../tidemark-go reference checkout not present")
     output = tmp_path / "tidemark-go"
     result = run_command("build go reference cli", ["go", "build", "-o", str(output), "./cmd/tidemark"], cwd=go_source)
     result.assert_success()
