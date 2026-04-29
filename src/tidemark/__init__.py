@@ -1,6 +1,6 @@
 """tidemark Python package."""
 
-__version__ = "0.1.3"
+__version__ = "0.1.4"
 
 from tidemark.monitor import MonitorOptions, MonitorResult, run_monitor
 

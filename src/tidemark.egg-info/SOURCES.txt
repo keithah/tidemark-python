@@ -19,6 +19,7 @@ src/tidemark/audio/decoder.py
 src/tidemark/audio/models.py
 src/tidemark/cli/__init__.py
 src/tidemark/cli/cmd_clip.py
+src/tidemark/cli/cmd_doctor.py
 src/tidemark/cli/cmd_ingest.py
 src/tidemark/cli/cmd_monitor.py
 src/tidemark/cli/cmd_report.py
@@ -43,6 +44,7 @@ src/tidemark/markers/id3.py
 src/tidemark/markers/models.py
 src/tidemark/markers/scte35.py
 src/tidemark/runtime/__init__.py
+src/tidemark/runtime/doctor.py
 src/tidemark/runtime/health.py
 src/tidemark/runtime/logging.py
 src/tidemark/runtime/retry.py
