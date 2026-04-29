@@ -4,7 +4,9 @@ SCTE-35 ad marker detection, audio fingerprinting, and transcript search for liv
 
 ## Install
 
-Download the pre-built binary for your platform from the [latest release](../../releases/latest).
+Download the pre-built binary for your platform from the [latest release](https://github.com/keithah/tidemark-python/releases/latest).
+
+> **Note:** If `curl .../releases/latest/download/...` returns a 9-byte file or a "Not found" error, use the pinned tag URL instead: replace `latest/download` with `download/v0.1.0` (or whatever the current version is). GitHub's `latest` redirect can lag a few minutes after a new release.
 
 ### Linux (x86_64)
 
@@ -12,9 +14,10 @@ Download the pre-built binary for your platform from the [latest release](../../
 curl -Lo tidemark https://github.com/keithah/tidemark-python/releases/latest/download/tidemark-linux-x86_64
 chmod +x tidemark
 sudo mv tidemark /usr/local/bin/
+tidemark --help
 ```
 
-### macOS (Apple Silicon — M1/M2/M3)
+### macOS (Apple Silicon — M1/M2/M3/M4)
 
 ```sh
 curl -Lo tidemark https://github.com/keithah/tidemark-python/releases/latest/download/tidemark-macos-arm64
@@ -22,29 +25,22 @@ chmod +x tidemark
 sudo mv tidemark /usr/local/bin/
 ```
 
-macOS will block the binary on first run because it is unsigned. To allow it:
+macOS will block the binary on first run because it is unsigned. Clear the quarantine flag before running:
 
 ```sh
 xattr -d com.apple.quarantine /usr/local/bin/tidemark
+tidemark --help
 ```
 
-Or go to **System Settings → Privacy & Security** and click **Allow Anyway** after the first blocked run.
+Or go to **System Settings → Privacy & Security** and click **Allow Anyway** after the first blocked attempt.
 
-### macOS (Intel)
-
-```sh
-curl -Lo tidemark https://github.com/keithah/tidemark-python/releases/latest/download/tidemark-macos-x86_64
-chmod +x tidemark
-sudo mv tidemark /usr/local/bin/
-# clear quarantine if blocked:
-xattr -d com.apple.quarantine /usr/local/bin/tidemark
-```
+> macOS Intel is not supported in v0.1.0. Intel Mac users can [build from source](#building-from-source).
 
 ### Windows (x86_64)
 
-Download `tidemark-windows-x86_64.exe` from the [latest release](../../releases/latest), rename it to `tidemark.exe`, and move it somewhere on your `PATH` (e.g. `C:\Windows\System32\` or a directory listed in your user `PATH`).
+Download `tidemark-windows-x86_64.exe` from the [latest release](https://github.com/keithah/tidemark-python/releases/latest), rename it to `tidemark.exe`, and place it somewhere on your `PATH` (e.g. add a `C:\tools\` directory to your user `PATH`).
 
-Windows Defender may flag the binary on first run. Click **More info → Run anyway** or add an exclusion in Windows Security.
+Windows Defender may flag the binary on first run. Click **More info → Run anyway** or add an exclusion in Windows Security settings.
 
 ## Quick start
 
