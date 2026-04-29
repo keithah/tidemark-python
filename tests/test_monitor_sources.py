@@ -355,6 +355,50 @@ def test_iter_markers_for_source_routes_http_body_sniffed_playlist_as_hls(monkey
     assert list(iter_markers_for_source("https://example.test/live/channel", stream_type="auto")) == [expected_marker]
 
 
+def test_iter_markers_for_source_follows_hls_master_playlist_to_first_variant(monkeypatch):
+    """Monitor should transparently follow a master playlist to the first variant media playlist."""
+    master_manifest = (
+        "#EXTM3U\n"
+        "#EXT-X-VERSION:3\n"
+        "#EXT-X-INDEPENDENT-SEGMENTS\n"
+        "\n"
+        "#EXT-X-STREAM-INF:BANDWIDTH=154000,CODECS=\"mp4a.40.2\"\n"
+        "audio/154000/manifest.m3u8?token=abc\n"
+    )
+    expected_marker = marker_from_raw(source="variant-media")
+    opened = []
+
+    def fake_urlopen(request, timeout=None):
+        url = request.full_url if hasattr(request, "full_url") else request
+        opened.append(url)
+        if "master" in url:
+            return FakeHttpResponse(master_manifest.encode("utf-8"))
+        if "154000" in url:
+            return FakeHttpResponse(INLINE_HLS_MANIFEST.encode("utf-8"))
+        raise AssertionError(f"unexpected url: {url}")
+
+    def fake_scte35(manifest_text, *, segment_loader, manifest_url, timestamp=0.0):
+        assert manifest_text == INLINE_HLS_MANIFEST
+        assert "154000" in manifest_url
+        yield expected_marker
+
+    monkeypatch.setattr("tidemark.monitor_sources.urlopen", fake_urlopen)
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_scte35_markers", fake_scte35)
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_id3_markers", lambda *a, **kw: iter(()))
+
+    markers = list(
+        iter_markers_for_source(
+            "https://cdn.example/live/master.m3u8",
+            stream_type="hls",
+            timestamp_fn=lambda: 1.0,
+        )
+    )
+
+    assert markers == [expected_marker]
+    assert any("master" in u for u in opened)
+    assert any("154000" in u for u in opened)
+
+
 def test_iter_markers_for_source_dedupes_hls_markers_with_stable_keys(monkeypatch):
     duplicate = marker_from_raw(source="hls_manifest")
     duplicate.segment = 7

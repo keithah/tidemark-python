@@ -217,9 +217,15 @@ def _iter_hls_source(
 ) -> Iterator[AdMarker]:
     try:
         active_manifest_text = manifest_text
+        effective_source: SourceInput = source
         if active_manifest_text is None:
-            active_manifest_text = _load_hls_manifest_text(source, timeout=timeout, headers=headers, response=response)
-        segment_loader = _build_hls_segment_loader(source, timeout=timeout, headers=headers)
+            raw_text = _load_hls_manifest_text(source, timeout=timeout, headers=headers, response=response)
+            active_manifest_text, media_url = _resolve_hls_manifest(
+                raw_text, source=source, timeout=timeout, headers=headers
+            )
+            if media_url is not None:
+                effective_source = media_url
+        segment_loader = _build_hls_segment_loader(effective_source, timeout=timeout, headers=headers)
     except Exception as exc:
         _close_response(response)
         raise MonitorSourceError("hls source setup failed", stream_type=StreamType.HLS, phase="setup") from exc
@@ -234,7 +240,7 @@ def _iter_hls_source(
             marker_iterator = marker_iterator_factory(
                 active_manifest_text,
                 segment_loader=segment_loader,
-                manifest_url=str(source),
+                manifest_url=str(effective_source),
                 timestamp=timestamp,
             )
             for marker in marker_iterator:
@@ -245,6 +251,34 @@ def _iter_hls_source(
                 yield marker
     except Exception as exc:
         raise MonitorSourceError("hls source iteration failed", stream_type=StreamType.HLS, phase="iteration") from exc
+
+
+def _resolve_hls_manifest(
+    manifest_text: str,
+    *,
+    source: SourceInput,
+    timeout: float | None,
+    headers: dict[str, str] | None,
+) -> tuple[str, str | None]:
+    """If *manifest_text* is an HLS master playlist, fetch and return the first variant.
+
+    Returns ``(media_manifest_text, media_url)`` where *media_url* is the absolute URL
+    of the resolved media playlist (used as the effective source for segment loading).
+    Returns ``(manifest_text, None)`` unchanged when no master variant is found.
+    """
+    if "#EXT-X-STREAM-INF" not in manifest_text:
+        return manifest_text, None
+
+    source_str = str(source)
+    for line in manifest_text.splitlines():
+        line = line.strip()
+        if not line or line.startswith("#"):
+            continue
+        media_url = urljoin(source_str, line) if _is_network_source(source) else line
+        media_text = _load_hls_manifest_text(media_url, timeout=timeout, headers=headers)
+        return media_text, media_url
+
+    return manifest_text, None
 
 
 def _load_hls_manifest_text(
