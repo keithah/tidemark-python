@@ -21,7 +21,7 @@ from tidemark.store import insert_retained_audio, insert_segment, migrate
 
 ROOT = Path(__file__).resolve().parents[1]
 FIXTURE = ROOT / "tests" / "fixtures" / "scte35_splice_null.ts"
-EXPECTED_HELP_COMMANDS = ("monitor", "ingest", "status", "search", "report", "clip")
+EXPECTED_HELP_COMMANDS = ("monitor", "ingest", "status", "search", "report", "clip", "doctor")
 EXPECTED_MARKER_KEYS = [
     "Type",
     "Classification",
@@ -554,3 +554,25 @@ def test_packaged_clip_exports_from_retained_audio_database(
         assert exported.getframerate() == 16000
         assert exported.getsampwidth() == 2
         assert 0 < exported.getnframes() <= 1600
+
+
+def test_packaged_doctor_emits_check_results_without_traceback(
+    packaged_cli: Path,
+    clean_env: dict[str, str],
+    tmp_path: Path,
+) -> None:
+    result = run_packaged(packaged_cli, clean_env, "doctor", cwd=tmp_path)
+
+    # No traceback regardless of exit code (exit 1 is valid when checks fail, e.g. no Apple Speech on Linux)
+    assert "Traceback" not in result.stdout, _format_result(result)
+    assert "Traceback" not in result.stderr, _format_result(result)
+
+    # All expected check labels must appear
+    for label in ("python", "version", "audio decoder", "apple speech", "store"):
+        assert label in result.stdout, f"missing check label {label!r}\n{_format_result(result)}"
+
+    # Version line must report the correct version
+    assert "tidemark 0.1.3" in result.stdout, _format_result(result)
+
+    # PyAV must be available in the packaged binary
+    assert "[ok] audio decoder" in result.stdout, _format_result(result)
