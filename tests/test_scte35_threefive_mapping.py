@@ -28,6 +28,10 @@ EXPECTED_MARKER_KEYS = [
 MPEGTS_SYNC_BYTES = b"\x47" + (b"\x00" * 187) + b"\x47" + (b"\x00" * 187)
 
 
+@pytest.mark.skipif(
+    "threefive_is_scte35" not in Path(threefive.__file__).as_posix(),
+    reason="local threefive_is_scte35 checkout not active",
+)
 def test_threefive_imports_current_local_package():
     assert threefive.__version__ == "3.0.77"
     assert Path(threefive.__file__).as_posix().endswith(
