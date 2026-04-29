@@ -40,7 +40,7 @@ def test_pyinstaller_spec_freezes_onefile_console_binary_and_collects_runtime_da
     assert "pathex=[\"src\", threefive_source_root]" in source or "pathex=['src', threefive_source_root]" in source
     assert "collect_submodules(\"tidemark\")" in source or "collect_submodules('tidemark')" in source
     assert "threefive" in source
-    assert "collect_all(\"imageio_ffmpeg\")" in source or "collect_all('imageio_ffmpeg')" in source
+    assert "collect_all(\"av\")" in source or "collect_all('av')" in source
     assert "name=\"tidemark\"" in source or "name='tidemark'" in source
     assert "console=True" in source
     assert "onefile" not in source.lower(), "onefile should be expressed by a single-file EXE, not comments only"

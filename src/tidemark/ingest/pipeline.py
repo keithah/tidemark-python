@@ -9,7 +9,7 @@ from collections.abc import Callable
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
-from tidemark.ingest.segments import SegmentRecord, resolve_segments
+from tidemark.ingest.segments import SegmentRecord, iter_live_hls_segments, resolve_segments
 
 if TYPE_CHECKING:
     from tidemark.transcribe import Transcriber
@@ -49,6 +49,132 @@ class IngestPipelineResult:
     skipped_segment_ids: tuple[int, ...] = ()
     retained_audio_ids: tuple[int, ...] = ()
     song_ids: tuple[int, ...] = ()
+
+
+def ingest_live_hls_to_db(
+    source: str,
+    *,
+    db_path: str | Path,
+    transcriber: Transcriber,
+    timeout: float | None = None,
+    progress_callback: ProgressCallback | None = None,
+) -> IngestPipelineResult:
+    """Follow a live network HLS playlist, decode new segments, transcribe, and store words."""
+    _notify_progress(progress_callback, "resolving", _empty_progress_counters())
+    from tidemark.store import initialize_db, insert_transcript_words
+
+    conn = initialize_db(db_path)
+    try:
+        segment_ids: list[int] = []
+        skipped_segment_ids: list[int] = []
+        transcript_word_ids: list[int] = []
+        retained_audio_ids: list[int] = []
+        song_ids: list[int] = []
+        ad_event_ids: list[int] = []
+        issues: list[IngestIssue] = []
+
+        for segment in iter_live_hls_segments(source, timeout=timeout):
+            existing_segment_id = _find_restart_segment_id(conn, segment)
+            if existing_segment_id is not None:
+                skipped_segment_ids.append(existing_segment_id)
+                _notify_progress(
+                    progress_callback,
+                    "running",
+                    _progress_counters(
+                        total_segments=len(segment_ids) + len(skipped_segment_ids) + 1,
+                        segment_ids=segment_ids,
+                        skipped_segment_ids=skipped_segment_ids,
+                        transcript_word_ids=transcript_word_ids,
+                        ad_event_ids=ad_event_ids,
+                        issues=issues,
+                        retained_audio_ids=retained_audio_ids,
+                        song_ids=song_ids,
+                    ),
+                )
+                continue
+
+            segment_id = _insert_segment(conn, segment)
+            segment_ids.append(segment_id)
+
+            try:
+                from tidemark.audio import AudioDecodeError, decode_segment_audio
+
+                chunk = decode_segment_audio(segment)
+            except AudioDecodeError as exc:
+                issues.append(_issue("decode", segment.sequence, str(exc)))
+                _notify_progress(progress_callback, "running", _result_like_counters(segment_ids, skipped_segment_ids, transcript_word_ids, ad_event_ids, issues, retained_audio_ids, song_ids))
+                continue
+            except Exception:
+                issues.append(_issue("decode", segment.sequence, "audio decode failed"))
+                _notify_progress(progress_callback, "running", _result_like_counters(segment_ids, skipped_segment_ids, transcript_word_ids, ad_event_ids, issues, retained_audio_ids, song_ids))
+                continue
+
+            try:
+                transcript = transcriber.transcribe(chunk)
+            except Exception:
+                issues.append(_issue("transcribe", segment.sequence, "transcription failed"))
+            else:
+                try:
+                    transcript_word_ids.extend(
+                        insert_transcript_words(
+                            conn,
+                            segment_id=segment_id,
+                            source_url=chunk.source_url,
+                            segment_sequence=chunk.segment_sequence,
+                            words=transcript.words,
+                        )
+                    )
+                except Exception as exc:
+                    issues.append(_issue("store_transcript", segment.sequence, _safe_store_message(exc)))
+
+            _notify_progress(
+                progress_callback,
+                "running",
+                _result_like_counters(
+                    segment_ids,
+                    skipped_segment_ids,
+                    transcript_word_ids,
+                    ad_event_ids,
+                    issues,
+                    retained_audio_ids,
+                    song_ids,
+                ),
+            )
+
+        result = IngestPipelineResult(
+            segment_ids=tuple(segment_ids),
+            transcript_word_ids=tuple(transcript_word_ids),
+            ad_event_ids=tuple(ad_event_ids),
+            issues=tuple(issues),
+            skipped_segment_ids=tuple(skipped_segment_ids),
+            retained_audio_ids=tuple(retained_audio_ids),
+            song_ids=tuple(song_ids),
+        )
+        _notify_progress(progress_callback, "completed", _result_counters(result))
+        return result
+    finally:
+        conn.close()
+
+
+def _result_like_counters(
+    segment_ids: list[int],
+    skipped_segment_ids: list[int],
+    transcript_word_ids: list[int],
+    ad_event_ids: list[int],
+    issues: list[IngestIssue],
+    retained_audio_ids: list[int],
+    song_ids: list[int],
+) -> dict[str, int]:
+    return _progress_counters(
+        total_segments=len(segment_ids) + len(skipped_segment_ids),
+        segment_ids=segment_ids,
+        skipped_segment_ids=skipped_segment_ids,
+        transcript_word_ids=transcript_word_ids,
+        ad_event_ids=ad_event_ids,
+        issues=issues,
+        retained_audio_ids=retained_audio_ids,
+        song_ids=song_ids,
+    )
 
 
 class TranscriptFixtureError(ValueError):
@@ -495,6 +621,7 @@ __all__ = [
     "IngestPipelineProgress",
     "IngestPipelineResult",
     "TranscriptFixtureError",
+    "ingest_live_hls_to_db",
     "ingest_source_to_db",
     "load_fixture_transcript",
 ]

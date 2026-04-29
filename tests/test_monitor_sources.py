@@ -553,3 +553,105 @@ def test_iter_markers_for_source_wraps_icy_iterator_failures_without_private_det
     assert "token=abc" not in message
     assert "radio.example" not in message
     assert exc_info.value.__cause__ is not None
+
+
+def test_iter_markers_for_source_follow_live_hls_refreshes_until_timeout(monkeypatch):
+    first_manifest = """#EXTM3U
+#EXT-X-TARGETDURATION:1
+#EXT-X-MEDIA-SEQUENCE:10
+#EXTINF:1,
+seg10.ts
+"""
+    second_manifest = """#EXTM3U
+#EXT-X-TARGETDURATION:1
+#EXT-X-MEDIA-SEQUENCE:11
+#EXTINF:1,
+seg11.ts
+"""
+    opened = []
+    sleeps = []
+    manifests = [first_manifest, second_manifest, second_manifest]
+    times = iter([0.0, 0.1, 0.1, 0.1, 2.0])
+    expected_marker = marker_from_raw(source="live-hls")
+
+    def fake_urlopen(request, timeout=None):
+        url = request.full_url if hasattr(request, "full_url") else request
+        opened.append(url)
+        if url.endswith("playlist.m3u8"):
+            return FakeHttpResponse(manifests.pop(0).encode("utf-8"))
+        return FakeHttpResponse(b"segment bytes")
+
+    def fake_scte35(manifest_text, *, segment_loader, manifest_url, timestamp=0.0):
+        if "seg11.ts" in manifest_text:
+            yield expected_marker
+        return
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("tidemark.monitor_sources.urlopen", fake_urlopen)
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_scte35_markers", fake_scte35)
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_id3_markers", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr("tidemark.monitor_sources.time.monotonic", lambda: next(times))
+    monkeypatch.setattr("tidemark.monitor_sources.time.sleep", lambda delay: sleeps.append(delay))
+
+    markers = list(
+        iter_markers_for_source(
+            "https://cdn.example/live/playlist.m3u8",
+            stream_type="hls",
+            timeout=1.0,
+            follow_live_hls=True,
+        )
+    )
+
+    assert markers == [expected_marker]
+    assert opened.count("https://cdn.example/live/playlist.m3u8") >= 2
+    assert sleeps
+
+
+def test_iter_markers_for_source_does_not_follow_vod_hls_endlist(monkeypatch):
+    manifest = """#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:1
+#EXTINF:1,
+seg1.ts
+#EXT-X-ENDLIST
+"""
+    opened = []
+
+    def fake_urlopen(request, timeout=None):
+        url = request.full_url if hasattr(request, "full_url") else request
+        opened.append(url)
+        return FakeHttpResponse(manifest.encode("utf-8"))
+
+    monkeypatch.setattr("tidemark.monitor_sources.urlopen", fake_urlopen)
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_scte35_markers", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_id3_markers", lambda *args, **kwargs: iter(()))
+
+    assert list(
+        iter_markers_for_source(
+            "https://cdn.example/vod/playlist.m3u8",
+            stream_type="hls",
+            follow_live_hls=True,
+        )
+    ) == []
+    assert opened == ["https://cdn.example/vod/playlist.m3u8"]
+
+
+def test_iter_markers_for_source_monitor_hls_ignores_id3_decode_errors(monkeypatch):
+    manifest = """#EXTM3U
+#EXT-X-MEDIA-SEQUENCE:132
+#EXTINF:1,
+seg132.ts
+#EXT-X-ENDLIST
+"""
+
+    def fake_urlopen(request, timeout=None):
+        return FakeHttpResponse(manifest.encode("utf-8"))
+
+    def failing_id3(*args, **kwargs):
+        raise ValueError("Unable to decode hls_segment ID3 markers at segment 132")
+        yield  # pragma: no cover
+
+    monkeypatch.setattr("tidemark.monitor_sources.urlopen", fake_urlopen)
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_scte35_markers", lambda *args, **kwargs: iter(()))
+    monkeypatch.setattr("tidemark.monitor_sources.iter_hls_manifest_id3_markers", failing_id3)
+
+    assert list(iter_markers_for_source("https://cdn.example/live/playlist.m3u8", stream_type="hls")) == []

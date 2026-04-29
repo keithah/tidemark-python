@@ -1,3 +1,4 @@
+README.md
 pyproject.toml
 tidemark-python-gsd.md
 src/tidemark/__init__.py
@@ -48,11 +49,13 @@ src/tidemark/runtime/retry.py
 src/tidemark/store/__init__.py
 src/tidemark/store/db.py
 src/tidemark/transcribe/__init__.py
+src/tidemark/transcribe/apple.py
 src/tidemark/transcribe/fake.py
 src/tidemark/transcribe/models.py
 src/tidemark/transcribe/protocol.py
 tests/test_acoustid_lookup.py
 tests/test_acoustid_real_smoke.py
+tests/test_apple_transcriber.py
 tests/test_audio_decoder.py
 tests/test_classifier.py
 tests/test_cli_clip.py
@@ -60,6 +63,7 @@ tests/test_cli_config.py
 tests/test_cli_ingest.py
 tests/test_cli_ingest_integration.py
 tests/test_cli_integration.py
+tests/test_cli_main.py
 tests/test_cli_monitor.py
 tests/test_cli_report.py
 tests/test_cli_search.py
@@ -74,6 +78,7 @@ tests/test_hls_ingest.py
 tests/test_icy_ingest.py
 tests/test_id3_markers.py
 tests/test_ingest_pipeline.py
+tests/test_live_hls_ingest.py
 tests/test_marker_models.py
 tests/test_monitor.py
 tests/test_monitor_sources.py

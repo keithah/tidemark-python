@@ -8,10 +8,11 @@ call monitor source adapters, or fetch network URLs.
 from __future__ import annotations
 
 import hashlib
-from collections.abc import Callable
+import time
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, replace
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urljoin, urlparse
 
 
 class SegmentIngestError(ValueError):
@@ -64,6 +65,146 @@ class SegmentRecord:
     def with_loader(self, loader: Callable[[], bytes]) -> SegmentRecord:
         """Return a copy using a replacement byte loader for tests/integration seams."""
         return replace(self, _loader=loader)
+
+
+def iter_live_hls_segments(
+    source: str,
+    *,
+    timeout: float | None = None,
+    headers: dict[str, str] | None = None,
+) -> Iterator[SegmentRecord]:
+    """Yield newly discovered segments from a live network HLS playlist until timeout.
+
+    This is intentionally network-only and bounded by *timeout* when provided. VOD
+    playlists with ``#EXT-X-ENDLIST`` are yielded once and then stop.
+    """
+    if not _looks_like_network_url(source):
+        raise _error("source", detail="live HLS ingest requires a network URL")
+
+    from tidemark.monitor_sources import _load_hls_manifest_text, _resolve_hls_manifest
+
+    deadline = None if timeout is None else time.monotonic() + timeout
+    raw_text = _load_hls_manifest_text(source, timeout=timeout, headers=headers)
+    manifest_text, media_url = _resolve_hls_manifest(raw_text, source=source, timeout=timeout, headers=headers)
+    manifest_url = media_url or source
+    seen: set[str] = set()
+    emitted_any = False
+
+    while True:
+        for segment in _network_hls_segments_from_manifest(
+            manifest_text,
+            manifest_url=manifest_url,
+            seen=seen,
+            timeout=timeout,
+            headers=headers,
+        ):
+            emitted_any = True
+            yield segment
+
+        if _hls_has_endlist(manifest_text):
+            return
+        if _deadline_reached(deadline):
+            return
+        time.sleep(_poll_delay(manifest_text, deadline=deadline))
+        if _deadline_reached(deadline):
+            return
+        manifest_text = _load_hls_manifest_text(manifest_url, timeout=timeout, headers=headers)
+        if not emitted_any and _deadline_reached(deadline):
+            return
+
+
+def _network_hls_segments_from_manifest(
+    manifest_text: str,
+    *,
+    manifest_url: str,
+    seen: set[str],
+    timeout: float | None,
+    headers: dict[str, str] | None,
+) -> Iterator[SegmentRecord]:
+    from tidemark.monitor_sources import _open_http_response
+
+    sequence = 0
+    start_ts = 0.0
+    pending_duration: float | None = None
+
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                sequence = _parse_live_media_sequence(line)
+                continue
+            if line.startswith("#EXTINF:"):
+                pending_duration = _parse_extinf_duration(line, sequence=sequence)
+                continue
+            continue
+
+        duration = pending_duration
+        pending_duration = None
+        resolved_uri = urljoin(manifest_url, line)
+        if resolved_uri in seen:
+            start_ts += duration or 0.0
+            sequence += 1
+            continue
+
+        try:
+            with _open_http_response(resolved_uri, timeout=timeout, headers=headers) as response:
+                data = response.read()
+        except Exception as exc:
+            raise _error("segment", sequence=sequence, detail="unable to read network segment") from exc
+        if not isinstance(data, bytes):
+            raise _error("segment", sequence=sequence, detail="network segment response must be bytes")
+
+        seen.add(resolved_uri)
+        byte_length = len(data)
+        sha256 = hashlib.sha256(data).hexdigest()
+        yield SegmentRecord(
+            source_url=manifest_url,
+            sequence=sequence,
+            resolved_uri=resolved_uri,
+            local_path=None,
+            start_ts=start_ts,
+            duration_seconds=duration,
+            byte_length=byte_length,
+            sha256=sha256,
+            metadata={"source_label": "live_hls"},
+            _loader=lambda payload=data: payload,
+        )
+        start_ts += duration or 0.0
+        sequence += 1
+
+
+def _hls_has_endlist(manifest_text: str) -> bool:
+    return any(line.strip() == "#EXT-X-ENDLIST" for line in manifest_text.splitlines())
+
+
+def _poll_delay(manifest_text: str, *, deadline: float | None) -> float:
+    target = 1.0
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#EXT-X-TARGETDURATION:"):
+            continue
+        try:
+            target = max(float(line.removeprefix("#EXT-X-TARGETDURATION:").strip()), 0.25)
+        except ValueError:
+            target = 1.0
+        break
+    delay = min(max(target / 2.0, 0.25), 2.0)
+    if deadline is None:
+        return delay
+    return max(0.0, min(delay, deadline - time.monotonic()))
+
+
+def _deadline_reached(deadline: float | None) -> bool:
+    return deadline is not None and time.monotonic() >= deadline
+
+
+def _parse_live_media_sequence(line: str) -> int:
+    try:
+        return max(int(line.removeprefix("#EXT-X-MEDIA-SEQUENCE:").strip()), 0)
+    except ValueError as exc:
+        raise _error("manifest", detail="malformed media sequence") from exc
 
 
 def resolve_segments(

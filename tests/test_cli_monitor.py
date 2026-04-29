@@ -60,6 +60,7 @@ def patch_success(monkeypatch: pytest.MonkeyPatch, *, stdout_line: str | None = 
                 "stream_type": stream_type,
                 "timeout": timeout,
                 "headers": kwargs.get("headers"),
+                "follow_live_hls": kwargs.get("follow_live_hls"),
             }
         )
         return iter(())
@@ -96,6 +97,7 @@ def test_monitor_command_invokes_library_once_with_default_options(monkeypatch: 
         "stream_type": "auto",
         "timeout": None,
         "headers": None,
+        "follow_live_hls": True,
     }
     options = calls[1]["options"]
     assert isinstance(options, MonitorOptions)

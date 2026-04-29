@@ -2,13 +2,16 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
+import math
 import os
-import subprocess
+import struct
 import sys
+import wave
 from collections.abc import Iterable
 from pathlib import Path
 
-import imageio_ffmpeg
+import shutil
 import pytest
 
 from tidemark.audio import decode_segment_audio
@@ -46,26 +49,15 @@ def _acoustid_dependency_available() -> bool:
 
 
 def _make_tiny_wav(path: Path) -> Path:
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=1.0:sample_rate=16000",
-            "-ac",
-            "1",
-            "-y",
-            str(path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    sample_rate = 16000
+    n = int(sample_rate * 1.0)
+    buf = io.BytesIO()
+    with wave.open(buf, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(struct.pack(f"<{n}h", *[int(32767 * math.sin(2 * math.pi * 440 * i / sample_rate)) for i in range(n)]))
+    path.write_bytes(buf.getvalue())
     return path
 
 

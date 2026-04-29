@@ -1,16 +1,19 @@
 from __future__ import annotations
 
 import hashlib
+import io
 import json
+import math
 import os
 import re
 import shutil
 import sqlite3
+import struct
 import subprocess
 import wave
 from pathlib import Path
 
-import imageio_ffmpeg
+import shutil
 import pytest
 
 from tidemark.store import insert_retained_audio, insert_segment, migrate
@@ -124,26 +127,15 @@ def copy_monitor_fixture(tmp_path: Path) -> Path:
 
 
 def make_tiny_wav(path: Path) -> Path:
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=0.20:sample_rate=8000",
-            "-ac",
-            "1",
-            "-y",
-            str(path),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
+    sample_rate = 8000
+    n = int(sample_rate * 0.20)
+    buf = io.BytesIO()
+    with wave.open(buf, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(struct.pack(f"<{n}h", *[int(32767 * math.sin(2 * math.pi * 440 * i / sample_rate)) for i in range(n)]))
+    path.write_bytes(buf.getvalue())
     return path
 
 

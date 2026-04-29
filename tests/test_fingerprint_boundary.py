@@ -1,13 +1,17 @@
 from __future__ import annotations
 
 import hashlib
+import io
+import math
+import struct
 import subprocess
 import sys
+import wave
 from pathlib import Path
 from types import ModuleType
 from typing import Iterable
 
-import imageio_ffmpeg
+import shutil
 import pytest
 
 from tidemark.audio import AudioChunk, decode_segment_audio
@@ -47,28 +51,15 @@ def _fingerprint_backend(sample_rate: int, channels: int, pcmiter: Iterable[byte
 
 
 def _make_tiny_wav(tmp_path: Path) -> bytes:
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    output = tmp_path / "tiny.wav"
-    subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=660:duration=0.25:sample_rate=8000",
-            "-ac",
-            "1",
-            "-y",
-            str(output),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    return output.read_bytes()
+    sample_rate = 8000
+    n = int(sample_rate * 0.25)
+    buf = io.BytesIO()
+    with wave.open(buf, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        wf.writeframes(struct.pack(f"<{n}h", *[int(32767 * math.sin(2 * math.pi * 660 * i / sample_rate)) for i in range(n)]))
+    return buf.getvalue()
 
 
 def _segment_for(data: bytes) -> SegmentRecord:

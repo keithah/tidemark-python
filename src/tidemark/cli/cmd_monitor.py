@@ -122,6 +122,7 @@ def run_monitor_command(
                 url,
                 stream_type=resolved.stream_type,
                 timeout=resolved.timeout_seconds,
+                follow_live_hls=True,
             )
 
         result = run_monitor(

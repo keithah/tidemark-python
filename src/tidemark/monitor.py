@@ -205,6 +205,14 @@ def run_monitor(
                 try:
                     item = next(iterator)
                 except StopIteration:
+                    if _timed_out(active_options, start_time):
+                        return _finish(
+                            "timeout",
+                            state,
+                            stderr,
+                            emit_summary=active_options.emit_summary,
+                            progress_callback=active_options.progress_callback,
+                        )
                     return _finish(
                         "eof",
                         state,

@@ -436,6 +436,17 @@ def test_timeout_between_markers_stops_cleanly() -> None:
     assert "reason=timeout markers=1 emitted=1 filtered=0" in stderr.getvalue()
 
 
+
+def test_timeout_after_source_stops_returns_timeout_instead_of_eof() -> None:
+    times = iter([0.0, 0.0, 2.0])
+
+    result, stdout, stderr = run_with([], MonitorOptions(timeout=1.0, clock=lambda: next(times)))
+
+    assert result.reason == "timeout"
+    assert result.markers_seen == 0
+    assert stdout.getvalue() == ""
+    assert "reason=timeout markers=0 emitted=0 filtered=0" in stderr.getvalue()
+
 def test_keyboard_interrupt_stops_cleanly_without_error() -> None:
     first = marker(tag="#EXT-X-CUE-OUT")
 

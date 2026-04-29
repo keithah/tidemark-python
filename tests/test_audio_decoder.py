@@ -1,10 +1,13 @@
 from __future__ import annotations
 
 import hashlib
-import subprocess
+import io
+import math
+import struct
+import wave
 from pathlib import Path
 
-import imageio_ffmpeg
+import av
 import pytest
 
 from tidemark.audio import AudioChunk, AudioDecodeError, decode_segment_audio
@@ -26,33 +29,27 @@ def _segment_for(data: bytes, *, source_url: str = "https://example.test/live/pl
     )
 
 
-def _make_tiny_wav(tmp_path: Path) -> bytes:
-    ffmpeg = imageio_ffmpeg.get_ffmpeg_exe()
-    output = tmp_path / "tiny.wav"
-    subprocess.run(
-        [
-            ffmpeg,
-            "-hide_banner",
-            "-loglevel",
-            "error",
-            "-f",
-            "lavfi",
-            "-i",
-            "sine=frequency=440:duration=0.25:sample_rate=8000",
-            "-ac",
-            "1",
-            "-y",
-            str(output),
-        ],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.PIPE,
-    )
-    return output.read_bytes()
+def _make_tiny_wav() -> bytes:
+    """Generate a tiny sine-wave WAV using stdlib (no external tools required)."""
+    sample_rate = 8000
+    duration = 0.25
+    frequency = 440.0
+    n_samples = int(sample_rate * duration)
+    buf = io.BytesIO()
+    with wave.open(buf, "w") as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2)
+        wf.setframerate(sample_rate)
+        frames = struct.pack(
+            f"<{n_samples}h",
+            *[int(32767 * math.sin(2 * math.pi * frequency * i / sample_rate)) for i in range(n_samples)],
+        )
+        wf.writeframes(frames)
+    return buf.getvalue()
 
 
-def test_decode_segment_audio_returns_mono_16khz_pcm_chunk(tmp_path: Path) -> None:
-    media = _make_tiny_wav(tmp_path)
+def test_decode_segment_audio_returns_mono_16khz_pcm_chunk() -> None:
+    media = _make_tiny_wav()
     segment = _segment_for(media)
 
     chunk = decode_segment_audio(segment)
@@ -73,8 +70,8 @@ def test_decode_segment_audio_returns_mono_16khz_pcm_chunk(tmp_path: Path) -> No
     assert not hasattr(chunk, "search_text")
 
 
-def test_decode_segment_audio_preserves_zero_start_timestamp_for_very_short_fixture(tmp_path: Path) -> None:
-    media = _make_tiny_wav(tmp_path)
+def test_decode_segment_audio_preserves_zero_start_timestamp_for_very_short_fixture() -> None:
+    media = _make_tiny_wav()
     segment = _segment_for(media, sequence=0)
 
     chunk = decode_segment_audio(segment)
@@ -125,76 +122,38 @@ def test_decode_segment_audio_reports_missing_metadata_without_private_values() 
     assert "token=secret" not in message
 
 
-def test_decode_segment_audio_wraps_ffmpeg_lookup_failure(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_decode_segment_audio_wraps_pyav_error_without_leaking_details(monkeypatch: pytest.MonkeyPatch) -> None:
     segment = _segment_for(b"abc", source_url="https://cdn.example.test/live.ts?token=secret", sequence=9)
 
-    def fail_lookup() -> str:
-        raise RuntimeError("/Users/alice/private/ffmpeg missing")
+    def fail_open(*args: object, **kwargs: object) -> None:
+        raise av.AVError(-1, "Invalid data found when processing input /Users/alice/private/file.ts?token=secret")
 
-    monkeypatch.setattr("tidemark.audio.decoder.imageio_ffmpeg.get_ffmpeg_exe", fail_lookup)
+    monkeypatch.setattr("tidemark.audio.decoder.av.open", fail_open)
 
     with pytest.raises(AudioDecodeError) as excinfo:
         decode_segment_audio(segment)
 
     message = str(excinfo.value)
-    assert "Audio decode error during ffmpeg at sequence 9" in message
-    assert "unavailable" in message
+    assert "Audio decode error during decode at sequence 9" in message
+    assert "decode failed" in message
     assert "Users/alice" not in message
-    assert "ffmpeg missing" not in message
+    assert "token=secret" not in message
+    assert "Invalid data" not in message
 
 
-def test_decode_segment_audio_wraps_subprocess_failure_without_stderr_or_command(monkeypatch: pytest.MonkeyPatch) -> None:
-    media = b"abc"
-    segment = _segment_for(media, source_url="https://cdn.example.test/live.ts?token=secret", sequence=4)
+def test_decode_segment_audio_wraps_unexpected_exception_without_leaking_details(monkeypatch: pytest.MonkeyPatch) -> None:
+    segment = _segment_for(b"abc", source_url="https://cdn.example.test/live.ts?token=secret", sequence=4)
 
-    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        return subprocess.CompletedProcess(
-            args=["/Users/alice/private/ffmpeg", "-i", "https://cdn.example.test/live.ts?token=secret"],
-            returncode=1,
-            stdout=b"",
-            stderr=b"ffmpeg stderr /Users/alice/private/file.ts?token=secret Invalid data found",
-        )
+    def fail_open(*args: object, **kwargs: object) -> None:
+        raise RuntimeError("internal error at /Users/alice/private/file.ts?token=secret")
 
-    monkeypatch.setattr("tidemark.audio.decoder.subprocess.run", fake_run)
+    monkeypatch.setattr("tidemark.audio.decoder.av.open", fail_open)
 
     with pytest.raises(AudioDecodeError) as excinfo:
         decode_segment_audio(segment)
 
     message = str(excinfo.value)
     assert "Audio decode error during decode at sequence 4" in message
-    assert "ffmpeg returned non-zero status" in message
     assert "Users/alice" not in message
     assert "token=secret" not in message
-    assert "Invalid data" not in message
-    assert "-i" not in message
-
-
-def test_decode_segment_audio_wraps_subprocess_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
-    segment = _segment_for(b"abc", source_url="https://cdn.example.test/live.ts?token=secret", sequence=5)
-
-    def fake_run(*args: object, **kwargs: object) -> subprocess.CompletedProcess[bytes]:
-        raise subprocess.TimeoutExpired(
-            cmd=["/Users/alice/private/ffmpeg", "https://cdn.example.test/live.ts?token=secret"],
-            timeout=1.0,
-            stderr=b"/Users/alice/private/file.ts?token=secret",
-        )
-
-    monkeypatch.setattr("tidemark.audio.decoder.subprocess.run", fake_run)
-
-    with pytest.raises(AudioDecodeError) as excinfo:
-        decode_segment_audio(segment, timeout_seconds=1.0)
-
-    message = str(excinfo.value)
-    assert "Audio decode error during decode at sequence 5" in message
-    assert "ffmpeg timed out" in message
-    assert "Users/alice" not in message
-    assert "token=secret" not in message
-
-
-def test_decode_segment_audio_command_helper_is_inspectable() -> None:
-    command = decode_segment_audio.build_ffmpeg_command("/usr/bin/ffmpeg")
-
-    assert command[:3] == ["/usr/bin/ffmpeg", "-hide_banner", "-loglevel"]
-    assert "pipe:0" in command
-    assert command[-2:] == ["s16le", "pipe:1"]
-    assert "16000" in command
+    assert "internal error" not in message

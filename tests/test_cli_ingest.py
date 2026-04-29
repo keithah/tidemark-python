@@ -598,7 +598,7 @@ def test_no_fingerprint_option_preserves_fixture_required_path(monkeypatch: pyte
 
     assert result.exit_code == 1
     assert calls == []
-    assert "--fixture-transcript is required unless --fingerprint is enabled" in result.stderr
+    assert "--fixture-transcript is required unless --fingerprint or --transcribe is enabled" in result.stderr
 
 
 @pytest.mark.parametrize(
@@ -707,7 +707,7 @@ def test_missing_fixture_transcript_is_a_cli_usage_error_before_pipeline(monkeyp
     assert result.exit_code == 1
     assert result.stdout == ""
     assert calls == []
-    assert "--fixture-transcript is required unless --fingerprint is enabled" in result.stderr
+    assert "--fixture-transcript is required unless --fingerprint or --transcribe is enabled" in result.stderr
     assert "Traceback" not in result.stderr
     assert str(source) not in result.stderr
     assert source.name not in result.stderr
@@ -746,7 +746,7 @@ def test_ingest_help_lists_required_fixture_db_and_fingerprint_options(monkeypat
 
     assert result.exit_code == 0
     assert "--db" in result.stdout
-    assert "--fixture-transcript" in result.stdout
+    assert "--fixture-transc" in result.stdout
     assert "--fingerprint" in result.stdout
     assert monitor_calls == []
 
@@ -768,3 +768,80 @@ def test_unknown_ingest_option_fails_as_usage_error_not_monitor_alias(monkeypatc
     assert "No such option" in result.stderr
     assert "--unknown" in result.stderr
     assert "Traceback" not in result.stderr
+
+
+def test_live_transcribe_ingest_uses_apple_backend_and_live_pipeline(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    calls: list[dict[str, object]] = []
+
+    class FakeAppleTranscriber:
+        engine = "apple-speech"
+
+    def fake_live_ingest(source, *, db_path, transcriber, timeout=None, progress_callback=None):
+        calls.append(
+            {
+                "source": source,
+                "db_path": Path(db_path),
+                "transcriber": type(transcriber).__name__,
+                "timeout": timeout,
+                "progress_callback": callable(progress_callback),
+            }
+        )
+        if callable(progress_callback):
+            progress_callback(
+                IngestPipelineProgress(
+                    phase="running",
+                    counters={
+                        "segments": 1,
+                        "processed": 1,
+                        "skipped": 0,
+                        "failed": 0,
+                        "words": 2,
+                        "markers": 0,
+                        "issues": 0,
+                        "retained": 0,
+                        "songs": 0,
+                    },
+                )
+            )
+        return IngestPipelineResult(segment_ids=(1,), transcript_word_ids=(10, 11), ad_event_ids=(), issues=())
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.AppleSpeechTranscriber", FakeAppleTranscriber)
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.ingest_live_hls_to_db", fake_live_ingest)
+
+    db_path = tmp_path / "live.sqlite"
+    result = invoke(["ingest", "https://example.test/live.m3u8", "--db", str(db_path), "--timeout", "3", "--verbose"])
+
+    assert result.exit_code == 0, result.output
+    assert calls == [
+        {
+            "source": "https://example.test/live.m3u8",
+            "db_path": db_path,
+            "transcriber": "FakeAppleTranscriber",
+            "timeout": 3.0,
+            "progress_callback": True,
+        }
+    ]
+    assert "words=2" in result.stdout
+    assert "[tidemark] ingest phase=running" in result.stderr
+
+
+def test_network_hls_ingest_can_explicitly_disable_default_transcription(tmp_path: Path) -> None:
+    result = invoke(["ingest", "https://example.test/live.m3u8", "--db", str(tmp_path / "live.sqlite"), "--no-transcribe"])
+
+    assert result.exit_code == 1
+    assert "--fixture-transcript is required unless --fingerprint or --transcribe is enabled" in result.stderr
+
+
+def test_live_transcribe_ingest_reports_apple_unavailable_with_verbose_traceback(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    from tidemark.transcribe import AppleSpeechUnavailable
+
+    def unavailable():
+        raise AppleSpeechUnavailable("apple speech is only available on macOS")
+
+    monkeypatch.setattr("tidemark.cli.cmd_ingest.AppleSpeechTranscriber", unavailable)
+
+    result = invoke(["ingest", "https://example.test/live.m3u8", "--db", str(tmp_path / "live.sqlite"), "--verbose"])
+
+    assert result.exit_code == 1
+    assert "apple speech is only available on macOS" in result.stderr
+    assert "Traceback" in result.stderr

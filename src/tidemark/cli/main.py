@@ -9,6 +9,7 @@ import click
 import typer
 from typer.core import TyperGroup
 
+from tidemark import __version__ as _package_version
 from tidemark.cli.cmd_clip import clip
 from tidemark.cli.cmd_ingest import ingest
 from tidemark.cli.cmd_monitor import monitor
@@ -34,13 +35,16 @@ class RootAliasGroup(TyperGroup):
             return "monitor", monitor_command, [url, *remaining]
 
 
+def _cli_version() -> str:
+    try:
+        return _pkg_version("tidemark")
+    except PackageNotFoundError:
+        return _package_version
+
+
 def _version_callback(value: bool) -> None:
     if value:
-        try:
-            ver = _pkg_version("tidemark")
-        except PackageNotFoundError:
-            ver = "unknown"
-        typer.echo(f"tidemark {ver}")
+        typer.echo(f"tidemark {_cli_version()}")
         raise typer.Exit()
 
 

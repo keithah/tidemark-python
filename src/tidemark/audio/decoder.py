@@ -1,14 +1,14 @@
-"""ffmpeg-backed audio decode boundary."""
+"""PyAV-backed audio decode boundary."""
 
 from __future__ import annotations
 
 import hashlib
-import subprocess
+import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import imageio_ffmpeg
+import av
 
 from tidemark.audio.models import AudioChunk
 from tidemark.ingest.segments import SegmentRecord
@@ -51,7 +51,7 @@ def decode_segment_audio(
     start_ts: float = 0.0,
     duration_seconds: float | None = None,
     metadata: dict[str, str] | None = None,
-    timeout_seconds: float = DEFAULT_DECODE_TIMEOUT_SECONDS,
+    timeout_seconds: float = DEFAULT_DECODE_TIMEOUT_SECONDS,  # kept for API compat
 ) -> AudioChunk:
     """Decode a segment or equivalent media payload to mono 16 kHz PCM bytes."""
     decode_input = _coerce_decode_input(
@@ -64,31 +64,8 @@ def decode_segment_audio(
         metadata=metadata,
     )
 
-    ffmpeg = _ffmpeg_executable(sequence=decode_input.sequence)
-    command = _build_ffmpeg_command(ffmpeg)
-    stdin_data = _media_bytes(decode_input)
-
-    try:
-        result = subprocess.run(
-            command,
-            input=stdin_data,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            check=False,
-            timeout=timeout_seconds,
-        )
-    except subprocess.TimeoutExpired as exc:
-        raise _error("decode", sequence=decode_input.sequence, detail="ffmpeg timed out") from exc
-    except OSError as exc:
-        raise _error("decode", sequence=decode_input.sequence, detail="ffmpeg execution failed") from exc
-
-    if result.returncode != 0:
-        cause = RuntimeError(_decode_stderr(result.stderr))
-        raise _error("decode", sequence=decode_input.sequence, detail="ffmpeg returned non-zero status") from cause
-
-    pcm = result.stdout
-    if not pcm:
-        raise _error("decode", sequence=decode_input.sequence, detail="ffmpeg produced no audio")
+    media_bytes = _media_bytes(decode_input)
+    pcm = _decode_pyav(media_bytes, sequence=decode_input.sequence)
 
     return AudioChunk(
         pcm_bytes=pcm,
@@ -103,6 +80,28 @@ def decode_segment_audio(
         byte_length=len(pcm),
         metadata=decode_input.metadata,
     )
+
+
+def _decode_pyav(media_bytes: bytes, *, sequence: int) -> bytes:
+    """Decode media bytes to 16 kHz mono s16le PCM using PyAV."""
+    try:
+        buf = io.BytesIO(media_bytes)
+        with av.open(buf, "r") as container:
+            resampler = av.AudioResampler(format="s16", layout="mono", rate=DEFAULT_SAMPLE_RATE)
+            pcm_chunks: list[bytes] = []
+            for frame in container.decode(audio=0):
+                for out_frame in resampler.resample(frame):
+                    pcm_chunks.append(bytes(out_frame.planes[0]))
+            for out_frame in resampler.resample(None):
+                pcm_chunks.append(bytes(out_frame.planes[0]))
+        pcm = b"".join(pcm_chunks)
+    except AudioDecodeError:
+        raise
+    except Exception:
+        raise _error("decode", sequence=sequence, detail="decode failed")
+    if not pcm:
+        raise _error("decode", sequence=sequence, detail="no audio output produced")
+    return pcm
 
 
 def _coerce_decode_input(
@@ -167,32 +166,6 @@ def _media_bytes(decode_input: _DecodeInput) -> bytes:
         raise _error("load", sequence=decode_input.sequence, detail="no segment bytes available") from exc
 
 
-def _ffmpeg_executable(*, sequence: int) -> str:
-    try:
-        return imageio_ffmpeg.get_ffmpeg_exe()
-    except Exception as exc:
-        raise _error("ffmpeg", sequence=sequence, detail="ffmpeg unavailable") from exc
-
-
-def _build_ffmpeg_command(ffmpeg: str) -> list[str]:
-    return [
-        ffmpeg,
-        "-hide_banner",
-        "-loglevel",
-        "error",
-        "-i",
-        "pipe:0",
-        "-vn",
-        "-ac",
-        str(DEFAULT_CHANNELS),
-        "-ar",
-        str(DEFAULT_SAMPLE_RATE),
-        "-f",
-        DEFAULT_SAMPLE_FORMAT,
-        "pipe:1",
-    ]
-
-
 def _public_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
     if not metadata:
         return {}
@@ -200,17 +173,6 @@ def _public_metadata(metadata: dict[str, Any] | None) -> dict[str, str]:
     return {str(key): str(value) for key, value in metadata.items() if key in allowed_keys}
 
 
-def _decode_stderr(stderr: bytes | str | None) -> str:
-    if stderr is None:
-        return ""
-    if isinstance(stderr, bytes):
-        return stderr.decode("utf-8", errors="replace")
-    return stderr
-
-
 def audio_sha256(chunk: AudioChunk) -> str:
     """Return a deterministic digest for tests or future internal diagnostics."""
     return hashlib.sha256(chunk.pcm_bytes).hexdigest()
-
-
-setattr(decode_segment_audio, "build_ffmpeg_command", _build_ffmpeg_command)

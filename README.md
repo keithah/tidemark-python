@@ -39,6 +39,8 @@ Windows Defender may flag the binary on first run. Click **More info → Run any
 
 ## Quick start
 
+`tidemark ingest` decodes audio with `ffmpeg` from your `PATH`. Install a normal system ffmpeg first, for example `brew install ffmpeg` on macOS.
+
 ```sh
 # Monitor a live HLS stream and print SCTE-35 markers as JSON
 tidemark monitor https://example.com/stream.m3u8
@@ -46,7 +48,7 @@ tidemark monitor https://example.com/stream.m3u8
 # Same stream, persist to SQLite
 tidemark monitor https://example.com/stream.m3u8 --db stream.db
 
-# Ingest a local HLS playlist, transcribe segments, fingerprint songs
+# Ingest a live HLS playlist; defaults to Apple Speech transcription on macOS
 tidemark ingest https://example.com/stream.m3u8 --db stream.db
 
 # Search transcript words

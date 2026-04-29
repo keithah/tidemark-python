@@ -8,6 +8,7 @@ iteration failures.
 from __future__ import annotations
 
 import ipaddress
+import ssl
 import time
 from collections.abc import Callable, Iterator
 from enum import Enum
@@ -15,6 +16,8 @@ from os import PathLike
 from pathlib import Path
 from urllib.parse import urljoin, urlparse
 from urllib.request import Request, urlopen
+
+import certifi
 
 from tidemark.ingest.hls import iter_hls_manifest_id3_markers, iter_hls_manifest_scte35_markers
 from tidemark.ingest.icy import DEFAULT_META_INT, icy_request_headers, iter_icy_markers
@@ -114,6 +117,7 @@ def iter_markers_for_source(
     timestamp_fn: Callable[[], float] = time.time,
     timeout: float | None = None,
     headers: dict[str, str] | None = None,
+    follow_live_hls: bool = False,
 ) -> Iterator[AdMarker]:
     """Yield markers from ``source`` using the detected or explicit adapter.
 
@@ -182,6 +186,7 @@ def iter_markers_for_source(
             headers=headers,
             manifest_text=sniffed_manifest_text,
             response=sniffed_response,
+            follow_live=follow_live_hls,
         )
         return
 
@@ -214,10 +219,16 @@ def _iter_hls_source(
     headers: dict[str, str] | None,
     manifest_text: str | None = None,
     response: object | None = None,
+    follow_live: bool = False,
 ) -> Iterator[AdMarker]:
+    live_deadline = None if timeout is None else time.monotonic() + timeout
+    processed_segments: set[str] = set()
+    seen: set[tuple[object, ...]] = set()
+
     try:
         active_manifest_text = manifest_text
         effective_source: SourceInput = source
+        media_url: str | None = None
         if active_manifest_text is None:
             raw_text = _load_hls_manifest_text(source, timeout=timeout, headers=headers, response=response)
             active_manifest_text, media_url = _resolve_hls_manifest(
@@ -230,27 +241,139 @@ def _iter_hls_source(
         _close_response(response)
         raise MonitorSourceError("hls source setup failed", stream_type=StreamType.HLS, phase="setup") from exc
 
-    seen: set[tuple[object, ...]] = set()
-    try:
-        timestamp = timestamp_fn()
-        for marker_iterator_factory in (
-            iter_hls_manifest_scte35_markers,
-            iter_hls_manifest_id3_markers,
-        ):
-            marker_iterator = marker_iterator_factory(
-                active_manifest_text,
-                segment_loader=segment_loader,
-                manifest_url=str(effective_source),
-                timestamp=timestamp,
-            )
-            for marker in marker_iterator:
-                key = _hls_marker_key(marker)
-                if key in seen:
+    while True:
+        try:
+            poll_manifest = active_manifest_text
+            if follow_live and _is_network_source(effective_source) and processed_segments:
+                poll_manifest = _load_hls_manifest_text(effective_source, timeout=timeout, headers=headers)
+
+            live_playlist = follow_live and _is_network_source(effective_source) and not _hls_has_endlist(poll_manifest)
+            manifest_to_scan = poll_manifest
+            new_segment_keys: set[str] = set()
+            if live_playlist:
+                manifest_to_scan, new_segment_keys = _filter_hls_manifest_to_unprocessed_segments(
+                    poll_manifest,
+                    manifest_url=str(effective_source),
+                    processed_segments=processed_segments,
+                )
+                if not new_segment_keys:
+                    if _live_hls_deadline_reached(live_deadline):
+                        return
+                    time.sleep(_hls_poll_delay(poll_manifest, live_deadline=live_deadline))
                     continue
-                seen.add(key)
-                yield marker
-    except Exception as exc:
-        raise MonitorSourceError("hls source iteration failed", stream_type=StreamType.HLS, phase="iteration") from exc
+                processed_segments.update(new_segment_keys)
+
+            timestamp = timestamp_fn()
+            yielded_marker = False
+            for marker_iterator_factory in (
+                iter_hls_manifest_scte35_markers,
+                iter_hls_manifest_id3_markers,
+            ):
+                try:
+                    marker_iterator = marker_iterator_factory(
+                        manifest_to_scan,
+                        segment_loader=segment_loader,
+                        manifest_url=str(effective_source),
+                        timestamp=timestamp,
+                    )
+                    for marker in marker_iterator:
+                        key = _hls_marker_key(marker)
+                        if key in seen:
+                            continue
+                        seen.add(key)
+                        yielded_marker = True
+                        yield marker
+                except ValueError as exc:
+                    if marker_iterator_factory is iter_hls_manifest_id3_markers and _is_ignorable_hls_id3_decode_error(exc):
+                        continue
+                    raise
+
+            if not live_playlist:
+                return
+            if _live_hls_deadline_reached(live_deadline):
+                return
+            if not yielded_marker:
+                time.sleep(_hls_poll_delay(poll_manifest, live_deadline=live_deadline))
+        except Exception as exc:
+            raise MonitorSourceError("hls source iteration failed", stream_type=StreamType.HLS, phase="iteration") from exc
+
+
+def _is_ignorable_hls_id3_decode_error(exc: ValueError) -> bool:
+    return str(exc).startswith("Unable to decode hls_segment ID3 markers at segment ")
+
+
+def _hls_has_endlist(manifest_text: str) -> bool:
+    return any(line.strip() == "#EXT-X-ENDLIST" for line in manifest_text.splitlines())
+
+
+def _hls_target_duration(manifest_text: str) -> float:
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line.startswith("#EXT-X-TARGETDURATION:"):
+            continue
+        try:
+            return max(float(line.removeprefix("#EXT-X-TARGETDURATION:").strip()), 0.25)
+        except ValueError:
+            return 1.0
+    return 1.0
+
+
+def _hls_poll_delay(manifest_text: str, *, live_deadline: float | None) -> float:
+    delay = min(max(_hls_target_duration(manifest_text) / 2.0, 0.25), 2.0)
+    if live_deadline is None:
+        return delay
+    remaining = live_deadline - time.monotonic()
+    return max(0.0, min(delay, remaining))
+
+
+def _live_hls_deadline_reached(live_deadline: float | None) -> bool:
+    return live_deadline is not None and time.monotonic() >= live_deadline
+
+
+def _filter_hls_manifest_to_unprocessed_segments(
+    manifest_text: str,
+    *,
+    manifest_url: str,
+    processed_segments: set[str],
+) -> tuple[str, set[str]]:
+    current_sequence = 0
+    pending_lines: list[str] = []
+    output_lines = ["#EXTM3U"]
+    first_sequence: int | None = None
+    new_segment_keys: set[str] = set()
+
+    for raw_line in manifest_text.splitlines():
+        line = raw_line.strip()
+        if not line:
+            continue
+        if line.startswith("#"):
+            if line.startswith("#EXT-X-MEDIA-SEQUENCE:"):
+                current_sequence = _parse_hls_media_sequence(line)
+            elif not line.startswith("#EXTM3U"):
+                pending_lines.append(line)
+            continue
+
+        segment_key = urljoin(manifest_url, line)
+        if segment_key not in processed_segments:
+            if first_sequence is None:
+                first_sequence = current_sequence
+                output_lines.append(f"#EXT-X-MEDIA-SEQUENCE:{current_sequence}")
+            output_lines.extend(pending_lines)
+            output_lines.append(line)
+            new_segment_keys.add(segment_key)
+        pending_lines = []
+        current_sequence += 1
+
+    if first_sequence is None:
+        return "#EXTM3U\n", set()
+    return "\n".join(output_lines) + "\n", new_segment_keys
+
+
+def _parse_hls_media_sequence(line: str) -> int:
+    try:
+        return max(int(line.removeprefix("#EXT-X-MEDIA-SEQUENCE:").strip()), 0)
+    except ValueError:
+        return 0
 
 
 def _resolve_hls_manifest(
@@ -426,9 +549,20 @@ def _sniff_http_source(
     return None, None, None
 
 
+def _ssl_context() -> ssl.SSLContext:
+    return ssl.create_default_context(cafile=certifi.where())
+
+
 def _open_http_response(url: str, *, timeout: float | None, headers: dict[str, str] | None):
     request = Request(url, headers=headers or {})
-    return urlopen(request, timeout=_http_timeout(timeout))
+    request_timeout = _http_timeout(timeout)
+    context = _ssl_context()
+    try:
+        return urlopen(request, timeout=request_timeout, context=context)
+    except TypeError as exc:
+        if "context" not in str(exc):
+            raise
+        return urlopen(request, timeout=request_timeout)
 
 
 def _http_timeout(timeout: float | None) -> float:

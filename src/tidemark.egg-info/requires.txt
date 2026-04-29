@@ -1,10 +1,16 @@
-imageio-ffmpeg>=0.5
+certifi>=2024.0.0
+av>=12
 mutagen>=1.47
 threefive>=3.0
 typer>=0.12
 
+[:sys_platform == "darwin"]
+pyobjc-framework-Cocoa>=10
+pyobjc-framework-Speech>=10
+
 [dev]
 pyinstaller>=6
+pyaes>=1.6
 pytest
 
 [fingerprint]

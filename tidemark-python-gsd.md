@@ -11,7 +11,7 @@
 - **Library-first.** Every capability lives in `tidemark.*` as importable Python. CLI is a thin shell. GUI (M005) calls the same library with zero changes underneath.
 - **SQLite is the source of truth.** Ad events, transcription words, song fingerprints — one `.db` file, one unified timeline.
 - **Platform-aware transcription.** macOS uses `SFSpeechRecognizer` via PyObjC (on-device, free, CoreML-accelerated). Linux/Windows use `openai-whisper`. The `Transcriber` protocol makes the caller indifferent.
-- **Single binary is a packaging concern.** PyInstaller + `imageio-ffmpeg` handles it in M004. M001–M003 don't compromise that path.
+- **Single binary is a packaging concern.** PyInstaller plus system `ffmpeg` availability handles it in M004. M001–M003 don't compromise that path.
 - **tidemark-go is retired** once M001 passes a side-by-side output comparison test against the same streams.
 
 ---
@@ -56,7 +56,7 @@ tidemark-python/
 │       │   └── models.py              # AdMarker dataclass (type, classification, source, tag, segment, timestamp, raw)
 │       │
 │       ├── audio/                     # Audio decode pipeline (new)
-│       │   ├── decoder.py             # imageio-ffmpeg: segment bytes → PCM float32, 16 kHz mono
+│       │   ├── decoder.py             # ffmpeg: segment bytes → PCM int16, 16 kHz mono
 │       │   └── models.py              # AudioChunk (pcm, sample_rate, start_ts, duration_s, source_url)
 │       │
 │       ├── transcribe/                # Speech recognition (new)
@@ -251,7 +251,7 @@ The `monitor` command is a direct port of the Go tool's behavior — stdout only
 
 | Slice | Title | Deliverable |
 |-------|-------|-------------|
-| S011 | Audio decoder | `audio/decoder.py`: `imageio-ffmpeg` decode of `.ts` / `.mp3` / PCM bytes → `AudioChunk` (float32 array, 16 kHz mono, wall-clock `start_ts`, `duration_s`). Unit tested with fixture file. |
+| S011 | Audio decoder | `audio/decoder.py`: `ffmpeg` decode of `.ts` / `.mp3` / PCM bytes → `AudioChunk` (float32 array, 16 kHz mono, wall-clock `start_ts`, `duration_s`). Unit tested with fixture file. |
 | S012 | Transcriber — Apple | `transcribe/apple.py`: PyObjC `SFSpeechRecognizer` in Python. Takes `.wav` path → `TranscriptResult` with word-level timestamps. macOS only. Integration tested with real fixture. |
 | S013 | Transcriber — Whisper | `transcribe/whisper.py`: `openai-whisper` with `word_timestamps=True`. Auto-selects engine: Apple on macOS if available, else Whisper. Config override. |
 | S014 | SQLite write path | `store/db.py`: insert `segments` + bulk-insert `words` + trigger FTS5 index. Also write `ad_events` from monitor pipeline so one DB covers both. |
@@ -283,7 +283,7 @@ The `monitor` command is a direct port of the Go tool's behavior — stdout only
 | S022 | Config file (TOML) | `~/.config/tidemark/config.toml`: `acoustid_key`, `whisper_model`, `db_path`, `audio_retention_days`, `poll_interval_s`, `log_level`, `transcriber` override |
 | S023 | Reconnect + dedup | Exponential backoff on stream drop (cap 60s). Segment dedup via `sha256` column — skip re-processing on restart. HLS sequence-number resume. |
 | S024 | Structured logging + status | JSON log lines with: segment processing latency, transcription engine used, queue depth, error counts. `tidemark status` shows live stats from DB. |
-| S025 | PyInstaller spec | `tidemark.spec`: bundle `imageio-ffmpeg` binary, PyObjC frameworks (macOS build), all transitive deps. Whisper models downloaded on first run to `~/.cache/tidemark/whisper/`. CI produces `tidemark-macos-arm64` and `tidemark-linux-x86_64`. Tested on clean VM with zero Python. |
+| S025 | PyInstaller spec | `tidemark.spec`: bundle Python code and PyObjC frameworks; require `ffmpeg` on PATH (macOS build), all transitive deps. Whisper models downloaded on first run to `~/.cache/tidemark/whisper/`. CI produces `tidemark-macos-arm64` and `tidemark-linux-x86_64`. Tested on clean VM with zero Python. |
 
 ---
 
@@ -315,7 +315,6 @@ dependencies = [
     "m3u8>=4.0",              # HLS playlist parsing
     "threefive>=23.0",        # SCTE-35 decoding (same author as Go's cuei)
     "mutagen>=1.47",          # ID3 tag parsing
-    "imageio-ffmpeg>=0.5",    # self-contained ffmpeg binary
     "openai-whisper>=20240930",
     "pyacoustid>=1.3",        # Chromaprint + AcoustID client
     "numpy>=1.26",
@@ -360,7 +359,7 @@ Install the dev extra (includes `pyinstaller`) into the repo venv:
 
 ### Build
 
-Run PyInstaller from a clean spec invocation. The spec lives at `tidemark.spec` in the repo root and bundles `imageio-ffmpeg`, all `tidemark.*` submodules, and the editable `threefive` checkout via `pathex`:
+Run PyInstaller from a clean spec invocation. The spec lives at `tidemark.spec` in the repo root and bundles all `tidemark.*` submodules, and the editable `threefive` checkout via `pathex`:
 
 ```sh
 .venv/bin/python -m PyInstaller --clean --noconfirm tidemark.spec
