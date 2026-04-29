@@ -23,6 +23,5 @@ jobs:
 
       - name: Run tests
         env:
-          FORCE_COLOR: "0"
-          NO_COLOR: "1"
+          _TYPER_FORCE_DISABLE_TERMINAL: "1"
         run: .venv/bin/pytest
