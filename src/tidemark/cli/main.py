@@ -2,6 +2,9 @@
 
 from __future__ import annotations
 
+from importlib.metadata import PackageNotFoundError, version as _pkg_version
+from typing import Annotated
+
 import click
 import typer
 from typer.core import TyperGroup
@@ -31,6 +34,16 @@ class RootAliasGroup(TyperGroup):
             return "monitor", monitor_command, [url, *remaining]
 
 
+def _version_callback(value: bool) -> None:
+    if value:
+        try:
+            ver = _pkg_version("tidemark")
+        except PackageNotFoundError:
+            ver = "unknown"
+        typer.echo(f"tidemark {ver}")
+        raise typer.Exit()
+
+
 app = typer.Typer(
     add_completion=False,
     cls=RootAliasGroup,
@@ -41,7 +54,12 @@ app = typer.Typer(
 
 
 @app.callback()
-def root() -> None:
+def root(
+    version: Annotated[
+        bool,
+        typer.Option("--version", "-V", callback=_version_callback, is_eager=True, help="Show version and exit."),
+    ] = False,
+) -> None:
     """Detect ad markers in HLS, ICY, MPEG-TS, and UDP streams."""
 
 

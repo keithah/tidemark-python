@@ -76,6 +76,10 @@ ConfigOption = Annotated[
     Path | None,
     typer.Option("--config", help="TOML config file to load for command defaults."),
 ]
+VerboseOption = Annotated[
+    bool,
+    typer.Option("--verbose", "-v", help="Print full error tracebacks to stderr for debugging."),
+]
 
 
 def run_monitor_command(
@@ -84,6 +88,7 @@ def run_monitor_command(
     stream_type: CliStreamType | None = None,
     json_output: bool = False,
     quiet: bool = False,
+    verbose: bool = False,
     marker_filter: CliMarkerFilter | None = None,
     json_out: Path | None = None,
     timeout: float | None = None,
@@ -128,6 +133,7 @@ def run_monitor_command(
                 db_path=resolved_db_path,
                 timeout=resolved.timeout_seconds,
                 emit_summary=not quiet,
+                verbose=verbose,
                 progress_callback=_monitor_progress_callback(reporter, logger, source=url),
                 retry_policy=RetryPolicy(
                     max_attempts=resolved.retry_attempts,
@@ -155,6 +161,7 @@ def monitor(
     stream_type: StreamTypeOption = None,
     json_output: JsonOption = False,
     quiet: QuietOption = False,
+    verbose: VerboseOption = False,
     marker_filter: FilterOption = None,
     json_out: JsonOutOption = None,
     timeout: TimeoutOption = None,
@@ -167,6 +174,7 @@ def monitor(
         stream_type=stream_type,
         json_output=json_output,
         quiet=quiet,
+        verbose=verbose,
         marker_filter=marker_filter,
         json_out=json_out,
         timeout=timeout,

@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import re
 import time
+import traceback as _traceback
 from collections.abc import Callable, Iterable, Iterator
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -62,6 +63,7 @@ class MonitorOptions:
     timeout: float | None = None
     clock: Callable[[], float] = time.monotonic
     emit_summary: bool = True
+    verbose: bool = False
     progress_callback: MonitorProgressCallback | None = None
     retry_policy: RetryPolicy | None = None
     retry_sleep: RetrySleep = time.sleep
@@ -162,6 +164,8 @@ def run_monitor(
                     progress_callback=active_options.progress_callback,
                 )
             except Exception as exc:
+                if active_options.verbose:
+                    _traceback.print_exc(file=stderr)
                 retry = _maybe_retry_source_failure(
                     exc,
                     next_retry_attempt,
@@ -217,6 +221,8 @@ def run_monitor(
                         progress_callback=active_options.progress_callback,
                     )
                 except Exception as exc:
+                    if active_options.verbose:
+                        _traceback.print_exc(file=stderr)
                     retry = _maybe_retry_source_failure(
                         exc,
                         next_retry_attempt,
