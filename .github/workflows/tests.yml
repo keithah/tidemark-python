@@ -22,4 +22,6 @@ jobs:
           .venv/bin/pip install -e '.[dev]'
 
       - name: Run tests
+        env:
+          NO_COLOR: "1"
         run: .venv/bin/pytest
