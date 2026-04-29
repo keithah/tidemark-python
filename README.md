@@ -20,19 +20,14 @@ tidemark --help
 ### macOS (Apple Silicon — M1/M2/M3/M4)
 
 ```sh
-curl -Lo tidemark https://github.com/keithah/tidemark-python/releases/latest/download/tidemark-macos-arm64
+curl -Lo tidemark https://github.com/keithah/tidemark-python/releases/download/v0.1.0/tidemark-macos-arm64
 chmod +x tidemark
+xattr -d com.apple.quarantine tidemark
 sudo mv tidemark /usr/local/bin/
-```
-
-macOS will block the binary on first run because it is unsigned. Clear the quarantine flag before running:
-
-```sh
-xattr -d com.apple.quarantine /usr/local/bin/tidemark
 tidemark --help
 ```
 
-Or go to **System Settings → Privacy & Security** and click **Allow Anyway** after the first blocked attempt.
+macOS will block unsigned binaries on first run. The `xattr` step above clears the quarantine flag before installing. Alternatively, go to **System Settings → Privacy & Security** and click **Allow Anyway** after the first blocked attempt.
 
 > macOS Intel is not supported in v0.1.0. Intel Mac users can [build from source](#building-from-source).
 
