@@ -11,6 +11,7 @@ from typer.core import TyperGroup
 
 from tidemark import __version__ as _package_version
 from tidemark.cli.cmd_clip import clip
+from tidemark.cli.cmd_doctor import doctor
 from tidemark.cli.cmd_ingest import ingest
 from tidemark.cli.cmd_monitor import monitor
 from tidemark.cli.cmd_report import report
@@ -67,6 +68,7 @@ def root(
     """Detect ad markers in HLS, ICY, MPEG-TS, and UDP streams."""
 
 
+app.command(name="doctor")(doctor)
 app.command(name="ingest")(ingest)
 app.command(name="monitor")(monitor)
 app.command(name="status")(status)
