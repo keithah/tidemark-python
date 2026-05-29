@@ -10,6 +10,7 @@ import shutil
 import sqlite3
 import struct
 import subprocess
+import tomllib
 import wave
 from pathlib import Path
 
@@ -282,6 +283,15 @@ def test_packaged_executable_exists_and_looks_like_linux_binary(packaged_cli: Pa
     assert os.access(packaged_cli, os.X_OK)
     if os.name == "posix" and "linux" in os.sys.platform:
         assert packaged_cli.read_bytes()[:4] == b"\x7fELF"
+        result = subprocess.run(
+            ["ldd", str(packaged_cli)],
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+        combined = result.stdout + result.stderr
+        assert "not a dynamic executable" in combined, _format_result(result)
+        assert "=>" not in combined, _format_result(result)
 
 
 def test_packaged_help_lists_core_commands(
@@ -572,7 +582,8 @@ def test_packaged_doctor_emits_check_results_without_traceback(
         assert label in result.stdout, f"missing check label {label!r}\n{_format_result(result)}"
 
     # Version line must report the correct version
-    assert "tidemark 0.1.3" in result.stdout, _format_result(result)
+    expected_version = tomllib.loads((ROOT / "pyproject.toml").read_text())["project"]["version"]
+    assert f"tidemark {expected_version}" in result.stdout, _format_result(result)
 
     # PyAV must be available in the packaged binary
     assert "[ok] audio decoder" in result.stdout, _format_result(result)

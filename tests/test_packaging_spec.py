@@ -9,6 +9,7 @@ ROOT = Path(__file__).resolve().parents[1]
 PYPROJECT = ROOT / "pyproject.toml"
 ENTRY = ROOT / "scripts" / "tidemark_pyinstaller_entry.py"
 SPEC = ROOT / "tidemark.spec"
+RELEASE_WORKFLOW = ROOT / ".github" / "workflows" / "release.yml"
 
 
 def test_packaging_dependencies_are_declared_for_runtime_and_dev_extras():
@@ -19,6 +20,7 @@ def test_packaging_dependencies_are_declared_for_runtime_and_dev_extras():
 
     assert any(dep.startswith("threefive>=3.0") for dep in dependencies)
     assert any(dep.startswith("pyinstaller>=6") for dep in dev_dependencies)
+    assert any(dep.startswith("staticx>=0.14") for dep in dev_dependencies)
     assert config["project"]["optional-dependencies"]["fingerprint"] == ["pyacoustid>=1.3"]
 
 
@@ -44,3 +46,15 @@ def test_pyinstaller_spec_freezes_onefile_console_binary_and_collects_runtime_da
     assert "name=\"tidemark\"" in source or "name='tidemark'" in source
     assert "console=True" in source
     assert "onefile" not in source.lower(), "onefile should be expressed by a single-file EXE, not comments only"
+
+
+def test_release_workflow_wraps_linux_artifact_as_static_executable():
+    source = RELEASE_WORKFLOW.read_text()
+
+    assert "staticx" in source
+    assert "ubuntu-latest" in source
+    assert "patchelf" in source
+    assert "squashfs-tools" in source
+    assert "dist/tidemark-linux-x86_64" in source
+    assert "ldd" in source
+    assert "not a dynamic executable" in source

@@ -23,7 +23,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pyinstaller>=6", "pyaes>=1.6", "pytest"]
+dev = ["pyinstaller>=6", "pyaes>=1.6", "pytest", "staticx>=0.14"]
 fingerprint = ["pyacoustid>=1.3"]
 
 [project.scripts]

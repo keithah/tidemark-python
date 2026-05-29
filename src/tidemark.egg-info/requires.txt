@@ -12,6 +12,7 @@ pyobjc-framework-Speech>=10
 pyinstaller>=6
 pyaes>=1.6
 pytest
+staticx>=0.14
 
 [fingerprint]
 pyacoustid>=1.3
