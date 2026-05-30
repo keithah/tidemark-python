@@ -65,3 +65,9 @@ def test_release_workflow_wraps_linux_artifact_as_static_executable():
     assert "ldd" in source
     assert "ldd \"$bin\" > /tmp/tidemark-linux-ldd.txt 2>&1 || true" in source
     assert "not a dynamic executable" in source
+    assert "uses: actions/checkout@v6" in source
+    assert "uses: actions/setup-python@v6" in source
+    assert "if: matrix.os != 'ubuntu-latest'" in source
+    assert "uses: actions/upload-artifact@v7" in source
+    assert "uses: actions/download-artifact@v7" in source
+    assert "uses: softprops/action-gh-release@v3" in source
