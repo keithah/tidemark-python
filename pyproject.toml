@@ -24,7 +24,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-dev = ["pyinstaller>=6", "pyaes>=1.6", "pytest", "staticx>=0.14"]
+dev = ["pyinstaller>=6", "pyaes>=1.6", "pytest", "staticx>=0.14; sys_platform == 'linux'"]
 fingerprint = ["pyacoustid>=1.3"]
 
 [project.scripts]

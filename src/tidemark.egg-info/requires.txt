@@ -13,6 +13,8 @@ pyobjc-framework-Speech>=10
 pyinstaller>=6
 pyaes>=1.6
 pytest
+
+[dev:sys_platform == "linux"]
 staticx>=0.14
 
 [fingerprint]

@@ -22,7 +22,7 @@ def test_packaging_dependencies_are_declared_for_runtime_and_dev_extras():
     assert any(dep.startswith("threefive>=3.0,<3.0.78") for dep in dependencies)
     assert any(dep.startswith("typer>=0.12,<0.26") for dep in dependencies)
     assert any(dep.startswith("pyinstaller>=6") for dep in dev_dependencies)
-    assert any(dep.startswith("staticx>=0.14") for dep in dev_dependencies)
+    assert any(dep.startswith("staticx>=0.14") and "sys_platform == 'linux'" in dep for dep in dev_dependencies)
     assert config["project"]["optional-dependencies"]["fingerprint"] == ["pyacoustid>=1.3"]
 
 
@@ -56,7 +56,11 @@ def test_release_workflow_wraps_linux_artifact_as_static_executable():
     assert "staticx" in source
     assert "ubuntu-latest" in source
     assert "patchelf" in source
+    assert "python3-venv" in source
     assert "squashfs-tools" in source
+    assert "/usr/bin/python3 -m venv .venv-release" in source
+    assert ".venv-release/bin/pyinstaller tidemark.spec" in source
+    assert ".venv-release/bin/staticx" in source
     assert "dist/tidemark-linux-x86_64" in source
     assert "ldd" in source
     assert "ldd \"$bin\" > /tmp/tidemark-linux-ldd.txt 2>&1 || true" in source
