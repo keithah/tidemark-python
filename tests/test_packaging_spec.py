@@ -57,4 +57,5 @@ def test_release_workflow_wraps_linux_artifact_as_static_executable():
     assert "squashfs-tools" in source
     assert "dist/tidemark-linux-x86_64" in source
     assert "ldd" in source
+    assert "ldd \"$bin\" > /tmp/tidemark-linux-ldd.txt 2>&1 || true" in source
     assert "not a dynamic executable" in source
