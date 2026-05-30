@@ -12,7 +12,7 @@ Requires-Dist: click>=8
 Requires-Dist: mutagen>=1.47
 Requires-Dist: pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 Requires-Dist: pyobjc-framework-Speech>=10; sys_platform == "darwin"
-Requires-Dist: threefive<3.0.89,>=3.0
+Requires-Dist: threefive<3.0.78,>=3.0
 Requires-Dist: typer<0.26,>=0.12
 Provides-Extra: dev
 Requires-Dist: pyinstaller>=6; extra == "dev"

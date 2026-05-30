@@ -2,7 +2,7 @@ certifi>=2024.0.0
 av>=12
 click>=8
 mutagen>=1.47
-threefive<3.0.89,>=3.0
+threefive<3.0.78,>=3.0
 typer<0.26,>=0.12
 
 [:sys_platform == "darwin"]
