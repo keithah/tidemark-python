@@ -19,7 +19,8 @@ def test_packaging_dependencies_are_declared_for_runtime_and_dev_extras():
     dev_dependencies = config["project"]["optional-dependencies"]["dev"]
 
     assert any(dep.startswith("click>=8") for dep in dependencies)
-    assert any(dep.startswith("threefive>=3.0") for dep in dependencies)
+    assert any(dep.startswith("threefive>=3.0,<3.0.89") for dep in dependencies)
+    assert any(dep.startswith("typer>=0.12,<0.26") for dep in dependencies)
     assert any(dep.startswith("pyinstaller>=6") for dep in dev_dependencies)
     assert any(dep.startswith("staticx>=0.14") for dep in dev_dependencies)
     assert config["project"]["optional-dependencies"]["fingerprint"] == ["pyacoustid>=1.3"]
