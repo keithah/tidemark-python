@@ -1,6 +1,6 @@
 Metadata-Version: 2.4
 Name: tidemark
-Version: 0.1.4
+Version: 0.1.5
 Summary: Python port of tidemark ad marker detection.
 Author: tidemark contributors
 License: Proprietary
@@ -8,15 +8,17 @@ Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: certifi>=2024.0.0
 Requires-Dist: av>=12
+Requires-Dist: click>=8
 Requires-Dist: mutagen>=1.47
 Requires-Dist: pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 Requires-Dist: pyobjc-framework-Speech>=10; sys_platform == "darwin"
-Requires-Dist: threefive>=3.0
-Requires-Dist: typer>=0.12
+Requires-Dist: threefive<3.0.78,>=3.0
+Requires-Dist: typer<0.26,>=0.12
 Provides-Extra: dev
 Requires-Dist: pyinstaller>=6; extra == "dev"
 Requires-Dist: pyaes>=1.6; extra == "dev"
 Requires-Dist: pytest; extra == "dev"
+Requires-Dist: staticx>=0.14; extra == "dev"
 Provides-Extra: fingerprint
 Requires-Dist: pyacoustid>=1.3; extra == "fingerprint"
 
@@ -381,13 +383,16 @@ Install the dev extra (includes `pyinstaller`) into the repo venv:
 
 ### Build
 
-Run PyInstaller from a clean spec invocation. The spec lives at `tidemark.spec` in the repo root and bundles all `tidemark.*` submodules, and the editable `threefive` checkout via `pathex`:
+Run PyInstaller from a clean spec invocation. The spec lives at `tidemark.spec` in the repo root and bundles all `tidemark.*` submodules, and the editable `threefive` checkout via `pathex`. Linux release binaries must be wrapped with `staticx` before distribution:
 
 ```sh
 .venv/bin/python -m PyInstaller --clean --noconfirm tidemark.spec
+.venv/bin/staticx dist/tidemark dist/tidemark.static
+mv dist/tidemark.static dist/tidemark
+ldd dist/tidemark 2>&1 | grep -q "not a dynamic executable"
 ```
 
-Output: `dist/tidemark` (ELF, self-contained, no Python install required at runtime).
+Output: `dist/tidemark` (static ELF, self-contained, no Python install required at runtime).
 
 > **Note:** `threefive` is declared as a runtime dependency and its installed source root is included in `pathex` inside `tidemark.spec`. If you move the venv or the editable threefive checkout, update the `pathex` entry and rebuild.
 
@@ -417,7 +422,7 @@ These tests exercise the installed `.venv/bin/tidemark` binary (not the frozen e
 
 ### Platform scope
 
-- This build produces a Linux x86_64 ELF tied to the current glibc version.
+- This build produces a statically wrapped Linux x86_64 ELF.
 - macOS arm64 proof requires a native macOS build runner.
 - Release artifact automation (signing, notarization, cross-platform CI, checksums) is future M004+ distribution work, not covered here.
 - Live AcoustID fingerprinting is not exercised by packaged smoke; the clip smoke uses a deterministic pre-seeded SQLite fixture.

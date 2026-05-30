@@ -33,6 +33,10 @@ jobs:
       - name: Install dependencies
         run: pip install -e '.[dev]'
 
+      - name: Install Linux static wrapping tools
+        if: matrix.os == 'ubuntu-latest'
+        run: sudo apt-get update && sudo apt-get install -y patchelf squashfs-tools
+
       - name: Build executable
         run: pyinstaller tidemark.spec
 
@@ -45,6 +49,17 @@ jobs:
             dst="${dst}.exe"
           fi
           mv "$src" "$dst"
+
+      - name: Statically wrap Linux artifact
+        if: matrix.os == 'ubuntu-latest'
+        shell: bash
+        run: |
+          bin="dist/tidemark-linux-x86_64"
+          staticx "$bin" "${bin}.static"
+          mv "${bin}.static" "$bin"
+          ldd "$bin" > /tmp/tidemark-linux-ldd.txt 2>&1 || true
+          cat /tmp/tidemark-linux-ldd.txt
+          grep -q "not a dynamic executable" /tmp/tidemark-linux-ldd.txt
 
       - name: Smoke test binary
         shell: bash

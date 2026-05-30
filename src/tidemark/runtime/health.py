@@ -34,6 +34,19 @@ _SECRET_ASSIGNMENT_RE = re.compile(
 _SECRET_BEARER_RE = re.compile(r"(?i)\b(bearer|basic)\s+[a-z0-9._~+/=-]+")
 _URL_RE = re.compile(r"https?://[^\s]+", re.IGNORECASE)
 _SAFE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
+_LOCAL_SOURCE_SUFFIXES = {
+    ".aac",
+    ".db",
+    ".flac",
+    ".m3u",
+    ".m3u8",
+    ".mp3",
+    ".mp4",
+    ".sqlite",
+    ".sqlite3",
+    ".ts",
+    ".wav",
+}
 _REQUIRED_FIELDS = frozenset(
     {
         "schema_version",
@@ -129,7 +142,11 @@ def redact_source_label(value: object) -> str:
 def _looks_like_path(text: str, path: Path) -> bool:
     if any(character.isspace() for character in text):
         return False
-    return text.startswith(("/", "~", "./", "../")) or "\\" in text
+    return (
+        text.startswith(("/", "~", "./", "../"))
+        or "\\" in text
+        or path.suffix.lower() in _LOCAL_SOURCE_SUFFIXES
+    )
 
 
 @dataclass(frozen=True)

@@ -73,8 +73,9 @@ pip install -e '.[dev]'
 # Run tests
 pytest
 
-# Build a standalone executable (requires PyInstaller)
+# Build a standalone executable (requires PyInstaller; Linux builds are statically wrapped with staticx)
 pyinstaller tidemark.spec
+staticx dist/tidemark dist/tidemark.static && mv dist/tidemark.static dist/tidemark
 # Output: dist/tidemark
 ```
 

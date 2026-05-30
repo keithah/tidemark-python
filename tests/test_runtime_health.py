@@ -85,12 +85,14 @@ def test_make_run_id_is_filename_safe_and_reporter_uses_runs_directory(tmp_path:
 def test_source_label_redaction_removes_queries_secret_values_and_private_dirs(tmp_path: Path) -> None:
     url_label = redact_source_label("https://user:pass@example.com/private/live.m3u8?token=secret&x=1")
     path_label = redact_source_label(str(tmp_path / "private" / "source.wav"))
+    bare_file_label = redact_source_label("private-playlist.m3u8")
     error_label = redact_source_label("failed api_key=abc123 url=https://example.test/live?token=secret")
 
     assert url_label == "example.com/private/live.m3u8"
     assert "token" not in url_label
     assert "secret" not in url_label
     assert path_label == "[local file]"
+    assert bare_file_label == "[local file]"
     assert str(tmp_path) not in path_label
     assert "abc123" not in error_label
     assert "token=secret" not in error_label
