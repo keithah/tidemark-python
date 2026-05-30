@@ -8,6 +8,7 @@ Requires-Python: >=3.12
 Description-Content-Type: text/markdown
 Requires-Dist: certifi>=2024.0.0
 Requires-Dist: av>=12
+Requires-Dist: click>=8
 Requires-Dist: mutagen>=1.47
 Requires-Dist: pyobjc-framework-Cocoa>=10; sys_platform == "darwin"
 Requires-Dist: pyobjc-framework-Speech>=10; sys_platform == "darwin"

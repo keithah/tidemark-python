@@ -15,6 +15,7 @@ authors = [
 dependencies = [
     "certifi>=2024.0.0",
     "av>=12",
+    "click>=8",
     "mutagen>=1.47",
     "pyobjc-framework-Cocoa>=10; sys_platform == 'darwin'",
     "pyobjc-framework-Speech>=10; sys_platform == 'darwin'",
