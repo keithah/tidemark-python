@@ -71,9 +71,10 @@ jobs:
           bin="dist/tidemark-linux-x86_64"
           .venv-release/bin/staticx "$bin" "${bin}.static"
           mv "${bin}.static" "$bin"
+          file "$bin" | tee /tmp/tidemark-linux-file.txt
+          grep -q "statically linked" /tmp/tidemark-linux-file.txt
           ldd "$bin" > /tmp/tidemark-linux-ldd.txt 2>&1 || true
           cat /tmp/tidemark-linux-ldd.txt
-          grep -q "not a dynamic executable" /tmp/tidemark-linux-ldd.txt
 
       - name: Smoke test binary
         shell: bash

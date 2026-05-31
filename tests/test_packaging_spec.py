@@ -63,8 +63,9 @@ def test_release_workflow_wraps_linux_artifact_as_static_executable():
     assert ".venv-release/bin/staticx" in source
     assert "dist/tidemark-linux-x86_64" in source
     assert "ldd" in source
+    assert "file \"$bin\" | tee /tmp/tidemark-linux-file.txt" in source
+    assert "grep -q \"statically linked\" /tmp/tidemark-linux-file.txt" in source
     assert "ldd \"$bin\" > /tmp/tidemark-linux-ldd.txt 2>&1 || true" in source
-    assert "not a dynamic executable" in source
     assert "uses: actions/checkout@v6" in source
     assert "uses: actions/setup-python@v6" in source
     assert "if: matrix.os != 'ubuntu-latest'" in source
